@@ -1,0 +1,34 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+venv/
+.venv/
+env/
+
+# Cortex runtime
+cortex/gx10/cache/
+
+# Claude Code local settings
+.claude/settings.local.json
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Env
+.env
+.env.local
+.env.*.local
