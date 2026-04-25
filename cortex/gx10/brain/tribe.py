@@ -55,19 +55,34 @@ class TribeService:
 
     @staticmethod
     def _stub_result(mode: str, duration_s: int, has_visual: bool, has_audio: bool) -> dict[str, Any]:
+        # Amplitude tuned so vertex z-scores reach ~±2.5 — required for the frontend
+        # colormap (colormap.ts) to actually paint hot orange instead of staying gray-blue.
         n = int(duration_s)
+        n_v = config.TRIBE_VERTEX_COUNT
+        # Precompute per-vertex hotspot weight so a few regions glow together rather than
+        # a uniform flat field — looks brain-shaped instead of static.
+        hotspots = [n_v // 6, n_v // 3, n_v // 2, (2 * n_v) // 3, (5 * n_v) // 6]
+        sigma_sq_2 = 2.0 * 700.0 * 700.0
+        hotspot_weight = [
+            sum(math.exp(-((v - h) ** 2) / sigma_sq_2) for h in hotspots) for v in range(n_v)
+        ]
         frames = []
         for t in range(n):
-            base = math.sin(t * 0.4) * 0.6
-            activation = [base + math.sin((v + t) * 0.013) * 0.5 for v in range(config.TRIBE_VERTEX_COUNT)]
+            pulse = math.sin(t * 0.55) * 1.6 + 0.4  # global breath, pushes peaks into hot range
+            ripple_phase = t * 31
+            activation = [
+                pulse * hotspot_weight[v] * 1.9
+                + math.sin((v + ripple_phase) * 0.011) * 0.5
+                for v in range(n_v)
+            ]
             frames.append({"t": float(t), "activation": activation})
         engagement = {
-            "language": [math.sin(t * 0.3) * 0.6 + 0.2 for t in range(n)],
+            "language": [math.sin(t * 0.3) * 1.4 + 0.3 for t in range(n)],
         }
         if has_audio:
-            engagement["auditory"] = [math.cos(t * 0.25) * 0.4 + 0.1 for t in range(n)]
+            engagement["auditory"] = [math.cos(t * 0.25) * 1.2 + 0.2 for t in range(n)]
         if has_visual:
-            engagement["visual"] = [math.sin(t * 0.2 + 1) * 0.7 for t in range(n)]
+            engagement["visual"] = [math.sin(t * 0.2 + 1) * 1.5 for t in range(n)]
         return {
             "mode": mode,
             "duration_s": duration_s,
