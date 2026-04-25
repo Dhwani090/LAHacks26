@@ -16,7 +16,8 @@ const STOPS: Stop[] = [
   { z: -1, rgba: [26, 58, 138, 255] },
   { z: 0, rgba: [90, 112, 144, 255] },
   { z: 1, rgba: [232, 123, 30, 255] },
-  { z: 2, rgba: [255, 85, 0, 255] },
+  { z: 2, rgba: [255, 110, 30, 255] },
+  { z: 3, rgba: [255, 220, 170, 255] },
 ];
 
 export function zScoreToRGBA(z: number): RGBA {
