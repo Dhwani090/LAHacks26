@@ -1,0 +1,16 @@
+# PRD §3 backend stack — pinned where ABI matters.
+# See .claude/skills/tribe-inference/SKILL.md for the NumPy<2.1 gotcha.
+
+numpy<2.1
+fastapi>=0.110
+uvicorn[standard]>=0.27
+sse-starlette>=2.0
+pydantic>=2.6
+python-multipart>=0.0.9
+ffmpeg-python>=0.2.0
+transformers>=4.40
+torch>=2.3
+huggingface-hub>=0.23
+# Installed separately to control ordering (NumPy must be pinned first):
+#   pip install "tribev2[plotting] @ git+https://github.com/facebookresearch/tribev2.git"
+#   pip install cortexlab-toolkit
