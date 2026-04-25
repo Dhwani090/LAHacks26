@@ -11,6 +11,7 @@ import { brainClient, subscribeAnalysis } from '../lib/brainClient';
 import { frameBus } from '../lib/frameBus';
 import { TUNING } from '../lib/tuning';
 import { useAppState } from '../state/AppState';
+import { HeatmapText } from './HeatmapText';
 
 const HERO_SAMPLE =
   'Most creators ship work and wait two weeks for analytics to know if it landed. ' +
@@ -69,15 +70,29 @@ export function TextSurface() {
     }
   }
 
+  function handleEditAgain() {
+    unsubRef.current?.();
+    resetAnalysis();
+    frameBus.reset();
+  }
+
+  const showHeatmap = status === 'streaming' || status === 'complete';
+
   return (
     <div className="flex min-h-0 flex-1 flex-col gap-4">
-      <textarea
-        value={text}
-        onChange={(e) => setText(e.target.value)}
-        disabled={busy}
-        placeholder="Paste up to 500 words. The brain will tell you which sentences landed."
-        className="min-h-0 flex-1 resize-none rounded-md border border-white/10 bg-black/30 p-4 text-sm leading-relaxed text-white/90 placeholder:text-white/30 focus:border-orange-400/60 focus:outline-none disabled:opacity-60"
-      />
+      <div className="flex min-h-0 flex-1 flex-col">
+        {showHeatmap ? (
+          <HeatmapText text={text} />
+        ) : (
+          <textarea
+            value={text}
+            onChange={(e) => setText(e.target.value)}
+            disabled={busy}
+            placeholder="Paste up to 500 words. The brain will tell you which sentences landed."
+            className="min-h-0 flex-1 resize-none rounded-md border border-white/10 bg-black/30 p-4 text-sm leading-relaxed text-white/90 placeholder:text-white/30 focus:border-orange-400/60 focus:outline-none disabled:opacity-60"
+          />
+        )}
+      </div>
       <div className="flex shrink-0 items-center justify-between text-xs text-white/50">
         <div className="flex items-center gap-3">
           <span className={overLimit ? 'text-red-400' : ''}>
@@ -91,14 +106,24 @@ export function TextSurface() {
           )}
           {errorMessage && <span className="text-red-400">{errorMessage}</span>}
         </div>
-        <button
-          type="button"
-          onClick={handleDiagnose}
-          disabled={busy || wordCount === 0 || overLimit}
-          className="rounded-full border border-orange-400/60 bg-orange-400/10 px-5 py-2 text-xs font-medium uppercase tracking-[0.2em] text-orange-200 transition-colors hover:bg-orange-400/20 disabled:cursor-not-allowed disabled:border-white/10 disabled:bg-transparent disabled:text-white/30"
-        >
-          {busy ? 'analyzing…' : 'Diagnose'}
-        </button>
+        {showHeatmap ? (
+          <button
+            type="button"
+            onClick={handleEditAgain}
+            className="rounded-full border border-white/15 px-5 py-2 text-xs font-medium uppercase tracking-[0.2em] text-white/70 transition-colors hover:bg-white/5"
+          >
+            Edit again
+          </button>
+        ) : (
+          <button
+            type="button"
+            onClick={handleDiagnose}
+            disabled={busy || wordCount === 0 || overLimit}
+            className="rounded-full border border-orange-400/60 bg-orange-400/10 px-5 py-2 text-xs font-medium uppercase tracking-[0.2em] text-orange-200 transition-colors hover:bg-orange-400/20 disabled:cursor-not-allowed disabled:border-white/10 disabled:bg-transparent disabled:text-white/30"
+          >
+            {busy ? 'analyzing…' : 'Diagnose'}
+          </button>
+        )}
       </div>
     </div>
   );
