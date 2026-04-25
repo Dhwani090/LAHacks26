@@ -11,6 +11,8 @@ ffmpeg-python>=0.2.0
 transformers>=4.40
 torch>=2.3
 huggingface-hub>=0.23
+# Undeclared transitive dep of cortexlab.training — must install explicitly.
+lightning
 # Installed separately to control ordering (NumPy must be pinned first):
 #   pip install "tribev2[plotting] @ git+https://github.com/facebookresearch/tribev2.git"
 #   pip install cortexlab-toolkit

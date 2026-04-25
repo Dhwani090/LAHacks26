@@ -1,0 +1,25 @@
+CORTEX BACKEND SESSION LOG
+==========================
+Append a dated entry per session. Most recent at the bottom.
+Format: [YYYY-MM-DD HH:MM TZ session-handle] one-line summary.
+
+[2026-04-25 ~14:40 PDT claude-PH-B] PH-B started on GX10 (host gx10-4896, user asus, ssh from 100.95.158.11).
+  - Created `cortex` conda env (python 3.11) at ~/miniforge3/envs/cortex/
+  - Pinned numpy<2.1 (currently 2.0.2) BEFORE installing tribev2 per SKILL.md
+  - HF login as `amulyamanoj` (cortex-hackathon token, read perm) — token cached at ~/.cache/huggingface/token
+  - Persisted HF_HUB_DOWNLOAD_TIMEOUT=300 in ~/.bashrc
+  - Installing in background:
+      BG-A: tribev2[plotting] from git + cortexlab-toolkit + transformers + ffmpeg-python + fastapi + uvicorn + sse-starlette + pydantic + accelerate
+      BG-B: snapshot_download for meta-llama/Llama-3.2-3B + google/gemma-2-2b-it + facebook/tribev2
+  - Wrote: scripts/setup_env.sh (reproducible bootstrap), init.sh (per-session activator), this file.
+  - NEXT (when installs finish): run PH-B verification (`python -c "from cortexlab.inference.predictor import TribeModel; ... LOADED"`), then move to PH-C/D/E/F/G/H.
+  - NOTE: HF token was pasted in plain chat — must be rotated post-hackathon.
+
+[2026-04-25 ~15:24 PDT claude-PH-B] PH-B VERIFICATION PASSED.
+  - LLaMA-3.2-3B downloaded (~6GB, 38min). TRIBE weights downloaded (2min).
+  - tribev2 + cortexlab + torch 2.6 + transformers + fastapi + lightning installed.
+  - `from cortexlab.inference.predictor import TribeModel; m = TribeModel.from_pretrained('facebook/tribev2', device='auto')` → returns TribeModel instance ✅
+  - GOTCHA #1: cortexlab has undeclared dep on `lightning` (pytorch-lightning). Patched setup_env.sh + requirements.txt to install it explicitly. Without this, `from cortexlab.inference.predictor import TribeModel` fails at import time with `ModuleNotFoundError: No module named 'lightning'`.
+  - BLOCKED: google/gemma-2-2b-it download FAILED with GatedRepoError 403 — `amulyamanoj` HF account needs to accept the Gemma license at huggingface.co/google/gemma-2-2b-it. Retry snapshot_download once accepted.
+  - Cache dirs created: cache/{hero_text,hero_audio,hero_video,auto_improve,uploads}/ — empty, awaiting hero clip sourcing.
+  - NEXT: (a) human accepts Gemma license + retry download (b) human sources hero clips (5 video, 5 audio, 5 text) (c) write prerender_heroes.py + run PH-E/F/G (d) PH-H auto-improve sequences for khan + startup.
