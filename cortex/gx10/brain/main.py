@@ -124,7 +124,13 @@ async def stream(job_id: str) -> EventSourceResponse:
 
         yield streaming.cold_zones(result["cold_zones"])
         yield streaming.suggestions([])
-        yield streaming.complete()
+        yield streaming.complete(
+            {
+                "mode": mode,
+                "duration_s": result.get("duration_s", 0),
+                "engagement_curves": result.get("engagement_curves", {}),
+            }
+        )
 
     return EventSourceResponse(gen())
 

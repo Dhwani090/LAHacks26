@@ -39,3 +39,7 @@ export interface TranscriptWord {
   start: number;
   end: number;
 }
+
+// Per-track engagement: track name → per-second score in [-1.5, 1.5] roughly.
+// Common keys for video: "visual", "auditory", "language". Audio omits "visual".
+export type EngagementCurves = Record<string, number[]>;

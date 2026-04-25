@@ -11,7 +11,9 @@ import type {
   BrainFrame,
   ColdZone,
   EditSuggestion,
+  EngagementCurves,
   Mode,
+  TranscriptWord,
 } from '../lib/types';
 
 interface AppStateData {
@@ -21,6 +23,9 @@ interface AppStateData {
   brainFrames: BrainFrame[];
   coldZones: ColdZone[];
   suggestions: EditSuggestion[];
+  engagementCurves: EngagementCurves;
+  transcript: TranscriptWord[];
+  durationS: number;
   errorMessage: string | null;
 }
 
@@ -31,6 +36,9 @@ interface AppStateActions {
   appendBrainFrame: (frame: BrainFrame) => void;
   setColdZones: (zones: ColdZone[]) => void;
   setSuggestions: (suggestions: EditSuggestion[]) => void;
+  setEngagementCurves: (curves: EngagementCurves) => void;
+  setTranscript: (words: TranscriptWord[]) => void;
+  setDurationS: (s: number) => void;
   setError: (msg: string | null) => void;
   resetAnalysis: () => void;
 }
@@ -41,6 +49,9 @@ const initialAnalysis = {
   brainFrames: [],
   coldZones: [],
   suggestions: [],
+  engagementCurves: {} as EngagementCurves,
+  transcript: [] as TranscriptWord[],
+  durationS: 0,
   errorMessage: null,
 };
 
@@ -55,6 +66,9 @@ export const useAppState = create<AppStateData & AppStateActions>((set) => ({
     set((s) => ({ brainFrames: [...s.brainFrames, frame] })),
   setColdZones: (coldZones) => set({ coldZones }),
   setSuggestions: (suggestions) => set({ suggestions }),
+  setEngagementCurves: (engagementCurves) => set({ engagementCurves }),
+  setTranscript: (transcript) => set({ transcript }),
+  setDurationS: (durationS) => set({ durationS }),
   setError: (errorMessage) =>
     set({ errorMessage, status: errorMessage ? 'error' : 'idle' }),
   resetAnalysis: () => set({ ...initialAnalysis }),
