@@ -10,6 +10,7 @@ import type {
   EditSuggestion,
   LibraryListResponse,
   LibraryUploadResponse,
+  PredictEngagementResponse,
   SimilarityResponse,
   TranscriptWord,
 } from './types';
@@ -88,6 +89,18 @@ export const brainClient = {
     signal?: AbortSignal,
   ): Promise<{ new_text?: string; job_id?: string }> {
     return postJson('/apply-suggestion', { clip_id: clipId, suggestion_id: suggestionId, action }, signal);
+  },
+
+  predictEngagement(
+    jobId: string,
+    followers: number,
+    signal?: AbortSignal,
+  ): Promise<PredictEngagementResponse> {
+    return postJson<PredictEngagementResponse>(
+      '/predict-engagement',
+      { job_id: jobId, followers },
+      signal,
+    );
   },
 
   // §11.6 — creator library + originality search.

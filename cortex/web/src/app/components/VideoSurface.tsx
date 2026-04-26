@@ -11,13 +11,10 @@ import { frameBus } from '../lib/frameBus';
 import { TUNING } from '../lib/tuning';
 import { useAppState } from '../state/AppState';
 import type { ColdZone, EngagementCurves, TranscriptWord } from '../lib/types';
+import { DEMO_CREATOR_ID } from '../lib/creator';
+import { EngagementCard } from './EngagementCard';
 import { EngagementTimeline } from './EngagementTimeline';
-import { LibraryUploader } from './LibraryUploader';
 import { SimilarityPanel } from './SimilarityPanel';
-
-// Single-creator demo build — every upload goes into one library bucket.
-// PRD §11.6 caveat: multi-tenant comes after the hackathon.
-const DEMO_CREATOR_ID = 'demo';
 
 export function VideoSurface() {
   const [file, setFile] = useState<File | null>(null);
@@ -40,7 +37,6 @@ export function VideoSurface() {
   const setDurationS = useAppState((s) => s.setDurationS);
   const setError = useAppState((s) => s.setError);
   const resetAnalysis = useAppState((s) => s.resetAnalysis);
-  const [librarySize, setLibrarySize] = useState<number | null>(null);
 
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const unsubRef = useRef<(() => void) | null>(null);
@@ -158,15 +154,11 @@ export function VideoSurface() {
           />
         )}
 
-        {status === 'complete' && jobId && (
-          <SimilarityPanel
-            jobId={jobId}
-            creatorId={DEMO_CREATOR_ID}
-            refreshKey={librarySize ?? 0}
-          />
-        )}
+        {status === 'complete' && jobId && <EngagementCard jobId={jobId} />}
 
-        <LibraryUploader creatorId={DEMO_CREATOR_ID} onLibraryChange={setLibrarySize} />
+        {status === 'complete' && jobId && (
+          <SimilarityPanel jobId={jobId} creatorId={DEMO_CREATOR_ID} />
+        )}
       </div>
 
       <div className="flex shrink-0 items-center justify-between text-xs text-white/50">
