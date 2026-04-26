@@ -389,6 +389,27 @@ async def library_from_job(req: models.LibraryFromJobRequest) -> models.LibraryU
     )
 
 
+@app.delete("/library/{creator_id}/{video_id}")
+async def library_delete(creator_id: str, video_id: str) -> dict[str, Any]:
+    """Remove one entry from the creator's library. Idempotent — calling it
+    on an unknown video_id returns 404 so the UI can surface "already gone."
+    Use case: creator added duplicates or a wrong file and wants to clean up
+    before running similarity search."""
+    if not creator_id.strip():
+        raise HTTPException(status_code=400, detail="creator_id required")
+    try:
+        existed = library_registry.delete_entry(creator_id, video_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    if not existed:
+        raise HTTPException(status_code=404, detail="library entry not found")
+    return {
+        "creator_id": creator_id,
+        "video_id": video_id,
+        "library_size": library_registry.size(creator_id),
+    }
+
+
 @app.get("/library/{creator_id}", response_model=models.LibraryListResponse)
 async def library_list(creator_id: str) -> models.LibraryListResponse:
     entries = library_registry.load_creator_library(creator_id)

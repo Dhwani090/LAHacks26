@@ -277,6 +277,46 @@ def test_library_from_job_honors_custom_video_id(client, tmp_path):
     assert r.json()["library_entry_id"] == "renamed_clip"
 
 
+def test_library_delete_removes_entry_and_updates_size(client, tmp_path):
+    library_registry.root = tmp_path / "library"
+    library_registry.reset()
+    creator = "trim_me"
+    _upload_library_clip(client, creator, "keep.mp4")
+    _upload_library_clip(client, creator, "drop.mp4")
+    assert client.get(f"/library/{creator}").json()["size"] == 2
+
+    r = client.delete(f"/library/{creator}/drop")
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["video_id"] == "drop"
+    assert body["library_size"] == 1
+
+    listing = client.get(f"/library/{creator}").json()
+    assert listing["size"] == 1
+    assert listing["entries"][0]["video_id"] == "keep"
+
+
+def test_library_delete_404s_unknown_entry(client, tmp_path):
+    library_registry.root = tmp_path / "library"
+    library_registry.reset()
+    _upload_library_clip(client, "user", "real.mp4")
+    r = client.delete("/library/user/never_existed")
+    assert r.status_code == 404
+
+
+def test_library_delete_rejects_path_traversal(client, tmp_path):
+    library_registry.root = tmp_path / "library"
+    library_registry.reset()
+    _upload_library_clip(client, "user", "real.mp4")
+    # Starlette doesn't decode %2F into a path separator, so the route either
+    # 404s (path didn't match a real entry) or our video_id regex 400s. Both
+    # are safe — what matters is that the real entry survives untouched and
+    # nothing outside the creator dir gets deleted.
+    r = client.delete("/library/user/..%2Fescape")
+    assert r.status_code in (400, 404)
+    assert client.get("/library/user").json()["size"] == 1
+
+
 def test_library_upload_does_not_persist_mp4(client, tmp_path):
     """PRD §11.6 invariant: the library is brain-features-only — raw mp4s are
     deleted after the TRIBE+Whisper pipeline runs. The on-disk JSON sidecar is

@@ -13,7 +13,23 @@ import { useEffect, useRef, useState } from 'react';
 import { activationToVertexColors } from '../lib/colormap';
 import { frameBus } from '../lib/frameBus';
 import { TUNING } from '../lib/tuning';
-import type { BrainFrame } from '../lib/types';
+import { useAppState } from '../state/AppState';
+import type { BrainFrame, EngagementCurves } from '../lib/types';
+
+// Threshold (z-score) above which we name the active ROI on screen. 1.0z is
+// "this region is meaningfully above baseline" — strong enough that judges
+// can trust the callout, low enough that the overlay actually shows up on
+// real content. See PRD §10 colormap stops + .claude/skills/tribe-inference.
+const REGION_HOT_THRESHOLD_Z = 1.0;
+// Min time a region label stays on after it triggers — avoids flicker when
+// activation hovers around the threshold across consecutive frames.
+const REGION_LABEL_HOLD_MS = 700;
+
+const REGION_COPY: Record<string, { label: string; tone: string }> = {
+  visual: { label: 'visual cortex active', tone: '#a78bfa' },     // violet
+  auditory: { label: 'auditory cortex active', tone: '#34d399' }, // emerald
+  language: { label: 'language network active', tone: '#fb923c' },// orange
+};
 
 const MESH_URLS = [
   'https://niivue.com/demos/images/BrainMesh_ICBM152.lh.mz3',
@@ -26,8 +42,18 @@ export function BrainMonitor() {
   const framesRef = useRef<BrainFrame[]>([]);
   const playStartMsRef = useRef<number | null>(null);
   const tickTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const engagementCurvesRef = useRef<EngagementCurves>({});
+  const lastLabelMsRef = useRef<number>(0);
   const [meanActivation, setMeanActivation] = useState(0);
+  const [activeRegion, setActiveRegion] = useState<string | null>(null);
   const [initError, setInitError] = useState<string | null>(null);
+
+  // Selector: engagement curves arrive on `complete`, used by the tick loop
+  // to figure out which ROI is currently dominating during playback.
+  const engagementCurves = useAppState((s) => s.engagementCurves);
+  useEffect(() => {
+    engagementCurvesRef.current = engagementCurves;
+  }, [engagementCurves]);
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -125,6 +151,32 @@ export function BrainMonitor() {
           setMeanActivation(sum / targetLen);
           applyColors(interp);
 
+          // Region-name overlay: pull the per-ROI value at the current second
+          // from engagement curves (arrives on `complete`). If the strongest
+          // ROI is above threshold, name it. Hold the label for
+          // REGION_LABEL_HOLD_MS so flicker around the threshold doesn't make
+          // the text strobe on and off.
+          const curves = engagementCurvesRef.current;
+          const second = Math.min(i0, frames.length - 1);
+          let bestRoi: string | null = null;
+          let bestZ = REGION_HOT_THRESHOLD_Z;
+          for (const roi of Object.keys(REGION_COPY)) {
+            const series = curves[roi];
+            if (!series || series.length === 0) continue;
+            const z = series[Math.min(second, series.length - 1)];
+            if (typeof z === 'number' && z > bestZ) {
+              bestZ = z;
+              bestRoi = roi;
+            }
+          }
+          const nowMs = performance.now();
+          if (bestRoi) {
+            lastLabelMsRef.current = nowMs;
+            setActiveRegion((prev) => (prev === bestRoi ? prev : bestRoi));
+          } else if (nowMs - lastLabelMsRef.current > REGION_LABEL_HOLD_MS) {
+            setActiveRegion((prev) => (prev === null ? prev : null));
+          }
+
           if (
             i0 >= frames.length - 1 &&
             elapsed > frames.length * TUNING.TRIBE_FRAME_MS + 500
@@ -221,6 +273,27 @@ export function BrainMonitor() {
           mixBlendMode: 'overlay',
         }}
       />
+
+      {/* Region-name overlay — fades in when one ROI's per-second activation
+          crosses REGION_HOT_THRESHOLD_Z. Tells the judge what they're seeing
+          without them having to know the cortical anatomy. */}
+      {activeRegion && REGION_COPY[activeRegion] && (
+        <div
+          aria-live="polite"
+          className="pointer-events-none absolute left-1/2 top-[18%] flex -translate-x-1/2 items-center gap-2 rounded-full border bg-black/55 px-4 py-1.5 text-[11px] font-medium uppercase tracking-[0.22em] backdrop-blur-sm transition-opacity duration-300"
+          style={{
+            color: REGION_COPY[activeRegion].tone,
+            borderColor: `${REGION_COPY[activeRegion].tone}55`,
+            boxShadow: `0 0 24px ${REGION_COPY[activeRegion].tone}33`,
+          }}
+        >
+          <span
+            className="h-1.5 w-1.5 animate-pulse rounded-full"
+            style={{ backgroundColor: REGION_COPY[activeRegion].tone }}
+          />
+          {REGION_COPY[activeRegion].label}
+        </div>
+      )}
 
       {/* Top-left status badge — names what the brain is doing right now. */}
       <div className="pointer-events-none absolute left-4 top-4 flex items-center gap-2 rounded-full border border-white/10 bg-black/40 px-3 py-1 text-[10px] uppercase tracking-[0.22em] text-white/55 backdrop-blur-sm">

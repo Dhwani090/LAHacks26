@@ -106,6 +106,26 @@ class LibraryRegistry:
     def size(self, creator_id: str) -> int:
         return len(self.load_creator_library(creator_id))
 
+    def delete_entry(self, creator_id: str, video_id: str) -> bool:
+        """Remove a single library entry from disk + in-memory cache.
+
+        Returns True if the entry existed and was removed, False if not found.
+        Validates the video_id against the same regex used at write time so a
+        crafted id can't escape the creator's library directory.
+        """
+        if not _VIDEO_ID_RE.match(video_id):
+            raise ValueError(f"video_id contains invalid characters: {video_id!r}")
+        d = self._creator_dir(creator_id)
+        path = d / f"{video_id}.json"
+        existed = path.exists()
+        path.unlink(missing_ok=True)
+        # Update the in-memory list if it's already loaded.
+        if creator_id in self._libraries:
+            self._libraries[creator_id] = [
+                e for e in self._libraries[creator_id] if e.video_id != video_id
+            ]
+        return existed
+
     def reset(self) -> None:
         """Test hook — clear in-memory cache (filesystem untouched)."""
         self._libraries.clear()

@@ -156,6 +156,19 @@ export const brainClient = {
     return (await res.json()) as LibraryListResponse;
   },
 
+  async deleteLibraryEntry(
+    creatorId: string,
+    videoId: string,
+    signal?: AbortSignal,
+  ): Promise<{ creator_id: string; video_id: string; library_size: number }> {
+    const res = await fetch(
+      url(`/library/${encodeURIComponent(creatorId)}/${encodeURIComponent(videoId)}`),
+      { method: 'DELETE', signal },
+    );
+    if (!res.ok) throw new BrainClientError(`/library/${creatorId}/${videoId} → ${res.status}`);
+    return (await res.json()) as { creator_id: string; video_id: string; library_size: number };
+  },
+
   predictSimilarity(
     jobId: string,
     creatorId: string,

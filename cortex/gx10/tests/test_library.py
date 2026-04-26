@@ -83,6 +83,33 @@ def test_library_registry_save_replaces_same_video_id(tmp_path):
     np.testing.assert_allclose(lib[0].tribe_pooled, second.tribe_pooled)
 
 
+def test_library_registry_delete_removes_disk_and_memory(tmp_path):
+    reg = LibraryRegistry(root=tmp_path)
+    reg.save_entry("creator", _make_entry(1, "keep"))
+    reg.save_entry("creator", _make_entry(2, "drop"))
+    assert reg.size("creator") == 2
+    assert (tmp_path / "creator" / "drop.json").exists()
+
+    existed = reg.delete_entry("creator", "drop")
+    assert existed is True
+    assert reg.size("creator") == 1
+    assert not (tmp_path / "creator" / "drop.json").exists()
+    # Surviving entry untouched.
+    assert reg.load_creator_library("creator")[0].video_id == "keep"
+
+
+def test_library_registry_delete_returns_false_when_missing(tmp_path):
+    reg = LibraryRegistry(root=tmp_path)
+    reg.save_entry("creator", _make_entry(1, "only"))
+    assert reg.delete_entry("creator", "never_existed") is False
+
+
+def test_library_registry_delete_rejects_path_traversal(tmp_path):
+    reg = LibraryRegistry(root=tmp_path)
+    with pytest.raises(ValueError):
+        reg.delete_entry("creator", "../escape")
+
+
 def test_library_registry_rejects_path_traversal(tmp_path):
     reg = LibraryRegistry(root=tmp_path)
     with pytest.raises(ValueError):
