@@ -39,7 +39,6 @@ class EditSuggestion(BaseModel):
     cold_zone: ColdZone
     rationale: str
     rewrite: str | None = None
-    cut: dict | None = None  # {"start_t": float, "end_t": float}
 
 
 class BrainFrame(BaseModel):
@@ -51,13 +50,26 @@ class HealthResponse(BaseModel):
     status: Literal["ok", "degraded", "loading"]
     tribe_loaded: bool
     gemma_loaded: bool
+    predictor_loaded: bool
+    corpus_size: int
     cache_size: int
     gx10_uptime_s: float
 
 
-class AutoImproveRequest(BaseModel):
-    clip_id: str
-    version: int
+class PredictEngagementRequest(BaseModel):
+    job_id: str
+    followers: int = Field(default=0, ge=0)
+
+
+class PredictEngagementResponse(BaseModel):
+    predicted_rate: float
+    percentile: int
+    interpretation: str
+    corpus_size: int
+    predictor_version: str
+    followers_used: int
+    duration_s: float
+    n_cold_zones: int
 
 
 class ApplySuggestionRequest(BaseModel):

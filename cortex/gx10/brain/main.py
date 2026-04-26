@@ -1,7 +1,7 @@
 # Cortex brain — FastAPI app on the GX10.
-# Implements PRD §3 (architecture) + §9 (API contracts) — all 7 endpoints.
-# P0-A: stub responses; real TRIBE/Gemma/ffmpeg wiring arrives in P1/P2.
-# CORTEX_STUB_TRIBE=1 + CORTEX_STUB_GEMMA=1 lets this run on a laptop without the model stack.
+# Implements PRD §3 (architecture) + §9 (API contracts).
+# Three analysis modes (text/audio/video) over SSE; auto-editing was removed —
+# next iteration of "improve" will be a different surface.
 # See docs/PRD.md §9.
 
 from __future__ import annotations
@@ -15,11 +15,15 @@ from typing import Any
 
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 from sse_starlette.sse import EventSourceResponse
 
 from . import config, models, streaming
 from .cache import hero_cache
+from .corpus import corpus
 from .gemma import gemma_service
+from .pooling import frames_to_array, pool_tribe_output
+from .predictor import load_default_predictor, predictor
 from .tribe import tribe_service
 
 logger = logging.getLogger(__name__)
@@ -31,10 +35,12 @@ async def lifespan(app: FastAPI):
     hero_cache.load_heroes()
     tribe_service.load()
     gemma_service.load()
+    corpus.load(config.CACHE_DIR / "corpus.jsonl")
+    load_default_predictor()
     yield
 
 
-app = FastAPI(title="Cortex Brain", version="0.1.0", lifespan=lifespan)
+app = FastAPI(title="Cortex Brain", version="0.3.0", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
@@ -43,16 +49,23 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Serve any pre-rendered hero assets to the frontend.
+config.CACHE_DIR.mkdir(parents=True, exist_ok=True)
+app.mount("/cache", StaticFiles(directory=str(config.CACHE_DIR)), name="cache")
+
 _STARTED_AT = time.time()
 _JOBS: dict[str, dict[str, Any]] = {}
 
 
 @app.get("/health", response_model=models.HealthResponse)
 async def health() -> models.HealthResponse:
+    all_loaded = tribe_service.loaded and gemma_service.loaded and predictor.loaded
     return models.HealthResponse(
-        status="ok" if (tribe_service.loaded and gemma_service.loaded) else "degraded",
+        status="ok" if all_loaded else "degraded",
         tribe_loaded=tribe_service.loaded,
         gemma_loaded=gemma_service.loaded,
+        predictor_loaded=predictor.loaded,
+        corpus_size=corpus.size(),
         cache_size=hero_cache.size(),
         gx10_uptime_s=time.time() - _STARTED_AT,
     )
@@ -106,13 +119,12 @@ async def stream(job_id: str) -> EventSourceResponse:
         budgets = {"text": config.TEXT_BUDGET_S, "audio": config.AUDIO_BUDGET_S, "video": config.VIDEO_BUDGET_S}
         yield streaming.started(mode=mode, estimated_ms=int(budgets[mode] * 1000))
 
-        # Run inference (stub returns synthetic frames).
         if mode == "text":
             result = tribe_service.analyze_text(job["input"]["text"])
         elif mode == "audio":
             result = tribe_service.analyze_audio(Path(job["input"]["path"]))
         else:
-            path = Path(job["input"].get("path", ""))
+            path = Path(job["input"].get("path") or "stub.mp4")
             result = tribe_service.analyze_video(path)
 
         if mode in ("audio", "video"):
@@ -124,6 +136,18 @@ async def stream(job_id: str) -> EventSourceResponse:
 
         yield streaming.cold_zones(result["cold_zones"])
         yield streaming.suggestions([])
+
+        # For video jobs, cache pooled TRIBE features so /predict-engagement can
+        # look them up by job_id without re-running inference.
+        if mode == "video":
+            try:
+                arr = frames_to_array(result["brain_frames"])
+                job["pooled_features"] = pool_tribe_output(arr).tolist()
+                job["duration_s"] = float(result.get("duration_s") or arr.shape[0])
+                job["n_cold_zones"] = int(len(result.get("cold_zones") or []))
+            except Exception as exc:
+                logger.error("pooling failed for job %s: %s", job_id, exc)
+
         yield streaming.complete(
             {
                 "mode": mode,
@@ -135,46 +159,57 @@ async def stream(job_id: str) -> EventSourceResponse:
     return EventSourceResponse(gen())
 
 
-@app.post("/auto-improve", response_model=models.JobAccepted)
-async def auto_improve(req: models.AutoImproveRequest) -> models.JobAccepted:
-    job_id = str(uuid.uuid4())
-    _JOBS[job_id] = {"mode": "video", "auto_improve": True, "clip_id": req.clip_id, "version": req.version}
-    return models.JobAccepted(job_id=job_id, mode="video", estimated_ms=55_000)
-
-
-@app.get("/stream-improve/{job_id}")
-async def stream_improve(job_id: str) -> EventSourceResponse:
-    job = _JOBS.get(job_id)
-    if not job or not job.get("auto_improve"):
-        raise HTTPException(status_code=404, detail="unknown auto-improve job")
-
-    async def gen():
-        async for tok in gemma_service.stream_completion(system="", user=""):
-            yield streaming.reasoning(tok)
-        cut = {"operation": "cut", "params": {"start_t": 14.0, "end_t": 21.0}}
-        yield streaming.cutting(cut)
-        await asyncio.sleep(0.5)
-        yield streaming.cut_applied(v2_url="/cache/auto_improve/khan/v2.mp4")
-        yield streaming.reanalyzing()
-        # Replay v2 frames (stub).
-        result = tribe_service.analyze_video(Path("stub.mp4"))
-        for frame in result["brain_frames"]:
-            yield streaming.brain_frame(t=frame["t"], activation=frame["activation"])
-            await asyncio.sleep(0.02)
-        yield streaming.complete({
-            "v2_engagement": result["engagement_curves"],
-            "v2_cold_zones": result["cold_zones"],
-            "v2_suggestions": [],
-        })
-
-    return EventSourceResponse(gen())
-
-
 @app.post("/apply-suggestion", response_model=models.ApplySuggestionResponse)
 async def apply_suggestion(req: models.ApplySuggestionRequest) -> models.ApplySuggestionResponse:
     if req.action == "reject":
         return models.ApplySuggestionResponse()
-    # Stub: real text rewriter + new analyze job lands in P1-06/07.
     new_job_id = str(uuid.uuid4())
     _JOBS[new_job_id] = {"mode": "text", "input": {"text": "(rewritten stub)"}}
     return models.ApplySuggestionResponse(new_text="(rewritten stub)", job_id=new_job_id)
+
+
+def _interpret(percentile: int) -> str:
+    if percentile >= 75:
+        return "top 25% — this is hot for your audience size"
+    if percentile >= 50:
+        return "above median — solid for your account"
+    if percentile >= 25:
+        return "below median — worth iterating before posting"
+    return "bottom quartile — the brain features look weak vs. comparable videos"
+
+
+@app.post("/predict-engagement", response_model=models.PredictEngagementResponse)
+async def predict_engagement(req: models.PredictEngagementRequest) -> models.PredictEngagementResponse:
+    import numpy as np
+    if not predictor.loaded:
+        raise HTTPException(status_code=503, detail="predictor not loaded")
+    job = _JOBS.get(req.job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="unknown job_id")
+    if job.get("mode") != "video":
+        raise HTTPException(status_code=400, detail="predict-engagement requires a video job")
+    pooled = job.get("pooled_features")
+    if not pooled:
+        raise HTTPException(status_code=409, detail="job has no pooled features yet — wait for /stream complete")
+
+    followers = req.followers if req.followers > 0 else corpus.median_followers()
+    duration_s = float(job.get("duration_s") or 30.0)
+    n_cold_zones = int(job.get("n_cold_zones") or 0)
+
+    out = predictor.predict(
+        features=np.asarray(pooled, dtype=np.float32),
+        followers=followers,
+        duration_s=duration_s,
+        n_cold_zones=n_cold_zones,
+    )
+    pct = corpus.percentile(out["predicted_rate"])
+    return models.PredictEngagementResponse(
+        predicted_rate=out["predicted_rate"],
+        percentile=pct,
+        interpretation=_interpret(pct),
+        corpus_size=corpus.size(),
+        predictor_version=predictor.version,
+        followers_used=followers,
+        duration_s=duration_s,
+        n_cold_zones=n_cold_zones,
+    )

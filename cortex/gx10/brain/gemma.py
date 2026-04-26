@@ -1,26 +1,17 @@
-# Gemma 2B service — edit suggestions + auto-improve reasoning.
-# PRD §8.2 + skills/auto-improve/SKILL.md.
-# P0-A skeleton: loader + stub stream_completion that yields canned tokens.
-# Real transformers wiring lands in P1-06.
-# See docs/PRD.md §8.2.
+# Gemma 2B service — text-mode rewrite suggestions.
+# PRD §6.1 + §8.2.
+# Loads on startup so /health reports gemma_loaded=true; real text rewrite
+# generation lands when text suggestions are wired into /apply-suggestion.
+# See docs/PRD.md §6.1.
 
 from __future__ import annotations
-import asyncio
 import logging
 import os
-from typing import Any, AsyncIterator
+from typing import Any
 
 from . import config
 
 logger = logging.getLogger(__name__)
-
-_STUB_TOKENS = [
-    "Looking at the engagement curves, ",
-    "the language track dips hardest around 0:14 — ",
-    "viewers lost the thread mid-sentence. ",
-    "Cutting that 7-second filler should restore retention. ",
-    '\n\n```json\n{"reasoning":"language drop at 0:14, removing filler","operation":"cut","params":{"start_t":14.0,"end_t":21.0}}\n```',
-]
 
 
 class GemmaService:
@@ -51,16 +42,6 @@ class GemmaService:
     @property
     def loaded(self) -> bool:
         return self._loaded
-
-    async def stream_completion(self, system: str, user: str) -> AsyncIterator[str]:
-        """Yields generation tokens. Stub returns canned reasoning; real impl in P1-06."""
-        if os.environ.get("CORTEX_STUB_GEMMA") == "1" or self._model is None:
-            for tok in _STUB_TOKENS:
-                await asyncio.sleep(0.18)
-                yield tok
-            return
-        # Real path placeholder — implement in P1-06 with TextIteratorStreamer.
-        raise NotImplementedError("real Gemma streaming wired in P1-06")
 
 
 gemma_service = GemmaService()

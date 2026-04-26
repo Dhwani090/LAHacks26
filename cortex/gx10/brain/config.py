@@ -11,7 +11,6 @@ CACHE_DIR = GX10_ROOT / "cache"
 HERO_TEXT_DIR = CACHE_DIR / "hero_text"
 HERO_AUDIO_DIR = CACHE_DIR / "hero_audio"
 HERO_VIDEO_DIR = CACHE_DIR / "hero_video"
-AUTO_IMPROVE_DIR = CACHE_DIR / "auto_improve"
 
 # TRIBE
 TRIBE_MODEL_ID = "facebook/tribev2"
@@ -35,6 +34,3 @@ SERVER_PORT = 8080
 GEMMA_MODEL_ID = "google/gemma-2-2b-it"
 GEMMA_MAX_NEW_TOKENS = 512
 GEMMA_TEMPERATURE = 0.7
-
-# Hero clips with pre-rendered auto-improve (skill: auto-improve)
-HERO_CLIPS_WITH_AUTO_IMPROVE = {"khan", "startup"}

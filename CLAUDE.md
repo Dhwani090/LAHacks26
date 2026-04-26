@@ -1,14 +1,14 @@
 # CLAUDE.md — Cortex Project Rules
 
 > Auto-loaded every Claude Code session. Keep this file short — bloat causes important rules to get lost.
-> For domain-specific knowledge (TRIBE, Niivue, ffmpeg orchestration), see `.claude/skills/`.
+> For domain-specific knowledge (TRIBE, Niivue), see `.claude/skills/`.
 > If you're Claude Code: read this file fully, then ask which task in `@docs/TASKS.md` we're working on. **Do not start coding until I confirm.**
 
 ---
 
 ## 1. What we're building
 
-A Next.js + niivue web app that talks to a FastAPI server on an ASUS GX10 (128GB unified memory). The backend runs **TRIBE v2** (Meta FAIR neuroscience model, released March 2026) plus **Gemma 2B** plus **ffmpeg**. Three modes — text, audio, short-form video — share one engine. Tells creators what an average viewer's brain did with their content. **36-hour hackathon, demo Sunday morning, LA Hacks 2026.**
+A Next.js + niivue web app that talks to a FastAPI server on an ASUS GX10 (128GB unified memory). The backend runs **TRIBE v2** (Meta FAIR neuroscience model, released March 2026) plus **Gemma 2B**. Three modes — text, audio, short-form video — share one engine. Tells creators what an average viewer's brain did with their content. **36-hour hackathon, demo Sunday morning, LA Hacks 2026.**
 
 Full spec: `@docs/PRD.md`. Work queue: `@docs/TASKS.md`. Domain skills: `@.claude/skills/`.
 
@@ -18,7 +18,7 @@ Full spec: `@docs/PRD.md`. Work queue: `@docs/TASKS.md`. Domain skills: `@.claud
 - User accounts, login, auth, OAuth
 - Multi-day project history or shareable links
 - Long-form content (>60s video, >60s audio, >500 words text)
-- Auto-regeneration of new content (B-roll, voice synthesis, music swap)
+- Auto-editing of video by cutting low-engagement spans — removed; the diagnostic is the product. (Auto-regeneration of new content — B-roll, voice synthesis, music swap — also out.)
 - Real-time live camera or microphone input
 - Cloud inference fallback if GX10 is down — local or nothing
 - ChromaDB, vector stores, anything beyond filesystem JSON cache
@@ -31,7 +31,7 @@ If a teammate asks for any of these, point at this section and stop.
 
 **Frontend** (`cortex/web/`): Next.js 14 App Router, TypeScript, Tailwind, `@niivue/niivue` + `niivue-react`, `framer-motion`, `@cloudinary/react`. Native `fetch` + `EventSource`. NO axios, tRPC, Apollo, Redux.
 
-**Backend** (`cortex/gx10/`): Python 3.11, FastAPI + `sse-starlette`, `tribev2` from GitHub, `cortexlab-toolkit`, `transformers` + Gemma 2B, `ffmpeg-python`, Pydantic v2. In-memory dict + filesystem JSON cache. NO Chroma, NO SQLite, NO vector DB.
+**Backend** (`cortex/gx10/`): Python 3.11, FastAPI + `sse-starlette`, `tribev2` from GitHub, `cortexlab-toolkit`, `transformers` + Gemma 2B, `scikit-learn` (engagement predictor — ridge baseline, model class is swappable per PRD §11.2), `yt-dlp` (corpus ingest), Pydantic v2. In-memory dict + filesystem JSON cache + `corpus.jsonl`. NO Chroma, NO SQLite, NO vector DB.
 
 **Transport**: HTTP/JSON + SSE over Tailscale. NO WebSockets, NO gRPC.
 
@@ -130,7 +130,7 @@ Domain-specific patterns live here. Claude Code loads them only when invoked or 
 
 - `@.claude/skills/tribe-inference/SKILL.md` — calling `TribeModel`, gotchas, output shapes
 - `@.claude/skills/niivue-rendering/SKILL.md` — `niivue-react` patterns, mesh loading, vertex colors
-- `@.claude/skills/auto-improve/SKILL.md` — Gemma → ffmpeg → re-inference orchestration
+- `@.claude/skills/engagement-prediction/SKILL.md` — yt-dlp ingest, TRIBE feature pooling, ridge regression baseline, scraper-agent roadmap
 
 If a task touches one of these domains, load the skill first.
 

@@ -1,0 +1,167 @@
+#!/usr/bin/env python3
+"""Phase 1 of the two-phase corpus build (Mac-runnable, no TRIBE).
+
+PRD §11.4 + .claude/skills/engagement-prediction/SKILL.md §"yt-dlp invocation patterns".
+
+For each URL: fetch yt-dlp metadata → write `<id>.meta.json`, download mp4 → write `<id>.mp4`.
+Stdlib + yt-dlp subprocess only — no numpy, no torch, no TRIBE. Runs anywhere `yt-dlp`
+is on PATH.
+
+Idempotent: if both `<id>.meta.json` and `<id>.mp4` already exist with nonzero size, the
+URL is skipped. Re-run after a partial pull and it picks up where it stopped.
+
+Usage:
+    python scripts/download_shorts.py path/to/seed_urls.txt --out-dir downloads/
+    python scripts/download_shorts.py --url <url> --out-dir downloads/
+
+Hand off to the GX10:
+    rsync -avz --progress downloads/ gx10:~/cortex_downloads/
+    # then on the GX10:
+    python scripts/process_downloads.py --in-dir ~/cortex_downloads/
+"""
+from __future__ import annotations
+import argparse
+import importlib.util
+import json
+import logging
+import shutil
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+logger = logging.getLogger("download_shorts")
+
+
+def _yt_dlp_cmd() -> list[str]:
+    """Return the command prefix for invoking yt-dlp.
+
+    Prefers `<this-python> -m yt_dlp` when the module is importable in the running
+    interpreter (works inside venvs without polluting PATH). Falls back to the
+    `yt-dlp` binary on PATH otherwise.
+    """
+    if importlib.util.find_spec("yt_dlp") is not None:
+        return [sys.executable, "-m", "yt_dlp"]
+    binary = shutil.which("yt-dlp")
+    if binary:
+        return [binary]
+    logger.error("yt-dlp not importable and not on PATH — `pip install yt-dlp`")
+    sys.exit(2)
+
+
+_YT_DLP = _yt_dlp_cmd()
+
+
+def _yt_dlp_check() -> None:
+    """Kept for backwards-compat with older invocations; _yt_dlp_cmd does the work now."""
+    pass
+
+
+def fetch_metadata(url: str) -> dict:
+    r = subprocess.run(
+        [*_YT_DLP, "-j", "--skip-download", url],
+        capture_output=True, text=True, timeout=60,
+    )
+    if r.returncode != 0:
+        raise RuntimeError(f"yt-dlp metadata failed: {r.stderr[:300]}")
+    return json.loads(r.stdout)
+
+
+def download_video(url: str, out_dir: Path, video_id: str) -> Path:
+    """Download to <out_dir>/<id>.mp4 (or .mkv/.webm if mp4 isn't offered).
+
+    yt-dlp picks the best available container; we accept whatever lands so a missing
+    mp4-formatted variant doesn't hard-fail the pull.
+    """
+    template = str(out_dir / "%(id)s.%(ext)s")
+    r = subprocess.run(
+        [*_YT_DLP, "-f", "mp4/best", "-o", template, url],
+        capture_output=True, text=True, timeout=600,
+    )
+    if r.returncode != 0:
+        raise RuntimeError(f"yt-dlp download failed: {r.stderr[:300]}")
+    candidates = list(out_dir.glob(f"{video_id}.*"))
+    media = [c for c in candidates if c.suffix.lower() in {".mp4", ".mkv", ".webm", ".mov"}]
+    if not media:
+        raise RuntimeError(f"yt-dlp succeeded but no media file found for {video_id}")
+    return media[0]
+
+
+def already_downloaded(out_dir: Path, video_id: str) -> bool:
+    meta_ok = (out_dir / f"{video_id}.meta.json").exists() and (out_dir / f"{video_id}.meta.json").stat().st_size > 0
+    media = list(out_dir.glob(f"{video_id}.mp4")) + list(out_dir.glob(f"{video_id}.mkv")) + list(out_dir.glob(f"{video_id}.webm"))
+    media_ok = any(p.stat().st_size > 0 for p in media)
+    return meta_ok and media_ok
+
+
+def write_metadata(out_dir: Path, video_id: str, meta: dict) -> Path:
+    p = out_dir / f"{video_id}.meta.json"
+    p.write_text(json.dumps(meta, indent=2), encoding="utf-8")
+    return p
+
+
+def main() -> int:
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+    p = argparse.ArgumentParser(description=__doc__.split("\n", 1)[0])
+    p.add_argument("urls_file", nargs="?", help="text file with one URL per line")
+    p.add_argument("--url", action="append", default=[], help="explicit URL (repeatable)")
+    p.add_argument("--out-dir", type=Path, default=Path("downloads"),
+                   help="dir to write <id>.mp4 + <id>.meta.json (default: ./downloads)")
+    p.add_argument("--sleep", type=float, default=1.0, help="seconds between URLs (rate-limit kindness)")
+    args = p.parse_args()
+
+    logger.info("using yt-dlp via: %s", " ".join(_YT_DLP))
+
+    urls: list[str] = list(args.url)
+    if args.urls_file:
+        urls.extend(
+            line.strip() for line in Path(args.urls_file).read_text().splitlines()
+            if line.strip() and not line.strip().startswith("#")
+        )
+    if not urls:
+        p.error("no URLs given (pass a urls file or --url)")
+
+    args.out_dir.mkdir(parents=True, exist_ok=True)
+    ok, skipped, failed = 0, 0, 0
+
+    for i, url in enumerate(urls, 1):
+        logger.info("[%d/%d] %s", i, len(urls), url)
+        try:
+            meta = fetch_metadata(url)
+        except Exception as exc:
+            logger.error("metadata failed: %s", exc)
+            failed += 1
+            continue
+
+        vid = meta.get("id")
+        if not isinstance(vid, str) or not vid:
+            logger.error("metadata missing id, skipping")
+            failed += 1
+            continue
+
+        if already_downloaded(args.out_dir, vid):
+            logger.info("  already downloaded, skipping")
+            skipped += 1
+            continue
+
+        write_metadata(args.out_dir, vid, meta)
+        try:
+            media = download_video(url, args.out_dir, vid)
+        except Exception as exc:
+            logger.error("download failed: %s", exc)
+            (args.out_dir / f"{vid}.meta.json").unlink(missing_ok=True)  # don't leave half-state
+            failed += 1
+            continue
+
+        logger.info("  ok: %s (%.1f MB)", media.name, media.stat().st_size / 1e6)
+        ok += 1
+        if args.sleep > 0 and i < len(urls):
+            time.sleep(args.sleep)
+
+    logger.info("done: ok=%d skipped=%d failed=%d → %s", ok, skipped, failed, args.out_dir)
+    logger.info("transfer to GX10:  rsync -avz --progress %s/ gx10:~/cortex_downloads/", args.out_dir)
+    return 0 if (ok + skipped) > 0 else 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -50,13 +50,3 @@ def test_stream_text_emits_events(client):
     text = body.decode("utf-8")
     for ev in ("started", "brain_frame", "cold_zones", "complete"):
         assert f"event: {ev}" in text, f"missing event {ev}"
-
-
-def test_auto_improve_flow(client):
-    j = client.post("/auto-improve", json={"clip_id": "khan", "version": 1}).json()["job_id"]
-    with client.stream("GET", f"/stream-improve/{j}") as resp:
-        assert resp.status_code == 200
-        body = b"".join(resp.iter_bytes())
-    text = body.decode("utf-8")
-    for ev in ("reasoning", "cutting", "cut_applied", "reanalyzing", "brain_frame", "complete"):
-        assert f"event: {ev}" in text, f"missing event {ev}"

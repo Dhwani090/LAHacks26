@@ -1,7 +1,7 @@
 // VideoSurface — drop-a-video-clip UI for video mode (the spectacle).
-// PRD §6.3 (video mode) + §7 — player, 3-track timeline (P2-03), auto-improve (P2-07).
+// PRD §6.3 (video mode) + §7 — player, 3-track timeline.
 // On Diagnose: POST /analyze/video → subscribe /stream/{job_id} → frames to frameBus,
-// engagement/cold zones to AppState. AutoImproveButton swaps the video src for V2/V3.
+// engagement/cold zones to AppState.
 // See docs/PRD.md §6.3.
 'use client';
 
@@ -11,13 +11,12 @@ import { frameBus } from '../lib/frameBus';
 import { TUNING } from '../lib/tuning';
 import { useAppState } from '../state/AppState';
 import type { ColdZone, EngagementCurves, TranscriptWord } from '../lib/types';
-import { AutoImproveButton } from './AutoImproveButton';
 import { EngagementTimeline } from './EngagementTimeline';
 
 export function VideoSurface() {
   const [file, setFile] = useState<File | null>(null);
   const [videoSrc, setVideoSrc] = useState<string | null>(null);
-  const [clipId, setClipId] = useState<string | null>(null);
+  const [, setClipId] = useState<string | null>(null);
   const [currentTime, setCurrentTime] = useState(0);
 
   const status = useAppState((s) => s.status);
@@ -92,18 +91,6 @@ export function VideoSurface() {
       });
   }
 
-  function handleVersionChange(_version: number, newUrl: string) {
-    // newUrl may be a backend-relative path (e.g. /cache/auto_improve/khan/v2.mp4).
-    // Resolve against NEXT_PUBLIC_BRAIN_BASE_URL so the <video> tag can load it.
-    const base = process.env.NEXT_PUBLIC_BRAIN_BASE_URL ?? '';
-    const resolved = newUrl.startsWith('http') ? newUrl : `${base.replace(/\/$/, '')}${newUrl}`;
-    setVideoSrc(resolved);
-    if (videoRef.current) {
-      videoRef.current.load();
-      videoRef.current.currentTime = 0;
-    }
-  }
-
   function handlePickColdZone(zone: ColdZone) {
     if (videoRef.current) {
       videoRef.current.currentTime = zone.start;
@@ -127,48 +114,42 @@ export function VideoSurface() {
 
   return (
     <div className="flex min-h-0 flex-1 flex-col gap-4">
-      {videoSrc ? (
-        <video
-          ref={videoRef}
-          key={videoSrc}
-          src={videoSrc}
-          controls
-          onTimeUpdate={handleTimeUpdate}
-          onLoadedMetadata={handleLoadedMetadata}
-          className="max-h-[300px] w-full rounded-md bg-black object-contain"
-        />
-      ) : (
-        <label className="flex min-h-0 flex-1 cursor-pointer flex-col items-center justify-center gap-3 rounded-md border border-dashed border-white/15 bg-black/20 p-6 text-center text-sm text-white/50 transition-colors hover:border-orange-400/40 hover:text-white/80">
-          <input
-            type="file"
-            accept="video/mp4,video/quicktime"
-            className="hidden"
-            onChange={(e) => setFile(e.target.files?.[0] ?? null)}
+      <div className="flex min-h-0 flex-1 flex-col gap-4 overflow-y-auto pr-1">
+        {videoSrc ? (
+          <video
+            ref={videoRef}
+            key={videoSrc}
+            src={videoSrc}
+            controls
+            onTimeUpdate={handleTimeUpdate}
+            onLoadedMetadata={handleLoadedMetadata}
+            className="max-h-[260px] w-full shrink-0 rounded-md bg-black object-contain"
           />
-          <div>
-            <div className="text-base text-white/80">Drop video · 15–60s</div>
-            <div className="mt-1 text-xs text-white/30">mp4 · mov</div>
-          </div>
-        </label>
-      )}
+        ) : (
+          <label className="flex min-h-[200px] flex-1 cursor-pointer flex-col items-center justify-center gap-3 rounded-md border border-dashed border-white/15 bg-black/20 p-6 text-center text-sm text-white/50 transition-colors hover:border-orange-400/40 hover:text-white/80">
+            <input
+              type="file"
+              accept="video/mp4,video/quicktime"
+              className="hidden"
+              onChange={(e) => setFile(e.target.files?.[0] ?? null)}
+            />
+            <div>
+              <div className="text-base text-white/80">Drop video · 15–60s</div>
+              <div className="mt-1 text-xs text-white/30">mp4 · mov</div>
+            </div>
+          </label>
+        )}
 
-      {analyzed && (
-        <EngagementTimeline
-          curves={engagementCurves}
-          coldZones={coldZones}
-          durationS={durationS}
-          currentTime={currentTime}
-          onPickColdZone={handlePickColdZone}
-        />
-      )}
-
-      {analyzed && (
-        <AutoImproveButton
-          clipId={clipId}
-          disabled={status !== 'complete'}
-          onVersionChange={handleVersionChange}
-        />
-      )}
+        {analyzed && (
+          <EngagementTimeline
+            curves={engagementCurves}
+            coldZones={coldZones}
+            durationS={durationS}
+            currentTime={currentTime}
+            onPickColdZone={handlePickColdZone}
+          />
+        )}
+      </div>
 
       <div className="flex shrink-0 items-center justify-between text-xs text-white/50">
         <div className="flex items-center gap-3">

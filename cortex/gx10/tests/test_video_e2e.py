@@ -1,10 +1,10 @@
-"""End-to-end video flow smoke (P2-08).
+"""End-to-end video flow smoke.
 
-Drives the FastAPI app under stub mode through the demo Beat 2+3 sequence:
-  POST /analyze/video → /stream/{job} → POST /auto-improve → /stream-improve/{job}
-twice (V1→V2→V3). Asserts every expected SSE event arrives.
+Drives the FastAPI app under stub mode through:
+  POST /analyze/video → /stream/{job}
 
-Runs on laptop (no GX10) thanks to CORTEX_STUB_TRIBE/GEMMA=1.
+Asserts every expected SSE event arrives. Runs on laptop (no GX10) thanks to
+CORTEX_STUB_TRIBE/GEMMA=1.
 """
 from __future__ import annotations
 import io
@@ -34,7 +34,6 @@ def _drain(resp) -> str:
 
 
 def test_analyze_video_streams_full_event_sequence(client):
-    # Fake mp4 — backend in stub mode never reads the bytes.
     fake_mp4 = io.BytesIO(b"\x00\x00\x00\x18ftypisom" + b"\x00" * 64)
     files = {"file": ("hero.mp4", fake_mp4, "video/mp4")}
     r = client.post("/analyze/video", files=files)
@@ -49,42 +48,36 @@ def test_analyze_video_streams_full_event_sequence(client):
         assert f"event: {ev}" in text, f"video stream missing {ev}"
 
 
-def test_auto_improve_v1_to_v2_to_v3(client):
-    for round_idx, version in enumerate([1, 2], start=1):
-        r = client.post("/auto-improve", json={"clip_id": "khan", "version": version})
-        assert r.status_code == 200, f"round {round_idx}: {r.text}"
-        job_id = r.json()["job_id"]
-
-        with client.stream("GET", f"/stream-improve/{job_id}") as resp:
-            assert resp.status_code == 200
-            text = _drain(resp)
-
-        for ev in (
-            "reasoning",
-            "cutting",
-            "cut_applied",
-            "reanalyzing",
-            "brain_frame",
-            "complete",
-        ):
-            assert f"event: {ev}" in text, f"round {round_idx} missing {ev}"
+def test_health_reports_predictor_and_corpus(client):
+    body = client.get("/health").json()
+    assert "predictor_loaded" in body and isinstance(body["predictor_loaded"], bool)
+    assert "corpus_size" in body and isinstance(body["corpus_size"], int)
 
 
-def test_full_demo_path(client):
-    """Beat 2 + Beat 3 fused: analyze hero video then auto-improve twice."""
-    files = {"file": ("hero.mp4", io.BytesIO(b"\x00" * 256), "video/mp4")}
-    r = client.post("/analyze/video", files=files)
-    assert r.status_code == 200
-    analyze_job = r.json()["job_id"]
+def test_predict_engagement_returns_sane_payload(client):
+    fake_mp4 = io.BytesIO(b"\x00\x00\x00\x18ftypisom" + b"\x00" * 64)
+    files = {"file": ("hero.mp4", fake_mp4, "video/mp4")}
+    job_id = client.post("/analyze/video", files=files).json()["job_id"]
 
-    with client.stream("GET", f"/stream/{analyze_job}") as resp:
-        assert resp.status_code == 200
+    with client.stream("GET", f"/stream/{job_id}") as resp:
         _drain(resp)
 
-    for version in (1, 2):
-        ai = client.post("/auto-improve", json={"clip_id": "khan", "version": version})
-        assert ai.status_code == 200
-        with client.stream("GET", f"/stream-improve/{ai.json()['job_id']}") as resp:
-            assert resp.status_code == 200
-            text = _drain(resp)
-        assert "event: complete" in text
+    r = client.post("/predict-engagement", json={"job_id": job_id, "followers": 10_000})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert 0.0 < body["predicted_rate"] <= 1.0
+    assert 0 <= body["percentile"] <= 100
+    assert isinstance(body["interpretation"], str) and body["interpretation"]
+    assert body["followers_used"] == 10_000
+    assert body["predictor_version"]
+
+
+def test_predict_engagement_rejects_unknown_job(client):
+    r = client.post("/predict-engagement", json={"job_id": "no-such-job", "followers": 0})
+    assert r.status_code == 404
+
+
+def test_predict_engagement_rejects_text_job(client):
+    text_job = client.post("/analyze/text", json={"text": "hi"}).json()["job_id"]
+    r = client.post("/predict-engagement", json={"job_id": text_job, "followers": 0})
+    assert r.status_code == 400
