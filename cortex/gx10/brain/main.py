@@ -119,6 +119,43 @@ async def analyze_video(
     return models.JobAccepted(job_id=job_id, mode="video", estimated_ms=45_000)
 
 
+@app.get("/heroes")
+async def heroes() -> dict[str, list[dict[str, Any]]]:
+    """List the hero clips available for one-click demo replay."""
+    out: list[dict[str, Any]] = []
+    for mode in ("video", "audio", "text"):
+        # `_store` keys look like `hero_video:slug` — see HeroCache.load_heroes.
+        prefix = f"hero_{mode}:"
+        for key in hero_cache._store:
+            if key.startswith(prefix):
+                slug = key[len(prefix):]
+                out.append({"mode": mode, "slug": slug})
+    return {"heroes": out}
+
+
+@app.post("/analyze/hero", response_model=models.JobAccepted)
+async def analyze_hero(slug: str = Form(...), mode: str = Form("video")) -> models.JobAccepted:
+    """Demo-friendly fast path. If the hero JSON is cached, /stream replays it
+    instantly; otherwise we fall through to stub TRIBE on a synthetic input so
+    the demo never blocks on an empty cache."""
+    if mode not in ("video", "audio", "text"):
+        raise HTTPException(status_code=400, detail="mode must be video|audio|text")
+    job_id = str(uuid.uuid4())
+    cached = hero_cache.get_hero(mode, slug)
+    estimated = 1_500 if cached is not None else {
+        "text": config.TEXT_BUDGET_S,
+        "audio": config.AUDIO_BUDGET_S,
+        "video": config.VIDEO_BUDGET_S,
+    }[mode] * 1000
+    _JOBS[job_id] = {
+        "mode": mode,
+        "input": {"hero_slug": slug},
+        "source_name": f"hero_{slug}",
+        "hero_payload": cached,
+    }
+    return models.JobAccepted(job_id=job_id, mode=mode, estimated_ms=int(estimated))
+
+
 @app.get("/stream/{job_id}")
 async def stream(job_id: str) -> EventSourceResponse:
     job = _JOBS.get(job_id)
@@ -130,12 +167,19 @@ async def stream(job_id: str) -> EventSourceResponse:
         budgets = {"text": config.TEXT_BUDGET_S, "audio": config.AUDIO_BUDGET_S, "video": config.VIDEO_BUDGET_S}
         yield streaming.started(mode=mode, estimated_ms=int(budgets[mode] * 1000))
 
-        if mode == "text":
+        # Hero replay: if the job carries a cached hero payload, surface it
+        # directly. Falls through to live inference when the cache miss path
+        # populates `hero_payload = None`.
+        hero_payload = job.get("hero_payload")
+        if hero_payload is not None:
+            result = hero_payload
+        elif mode == "text":
             result = tribe_service.analyze_text(job["input"]["text"])
         elif mode == "audio":
-            result = tribe_service.analyze_audio(Path(job["input"]["path"]))
+            audio_path = job["input"].get("path") or "stub.wav"
+            result = tribe_service.analyze_audio(Path(audio_path))
         else:
-            path = Path(job["input"].get("path") or "stub.mp4")
+            path = Path(job["input"].get("path") or job["input"].get("hero_slug") or "stub.mp4")
             result = tribe_service.analyze_video(path)
 
         if mode in ("audio", "video"):
