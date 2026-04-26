@@ -27,7 +27,7 @@ from .pooling import frames_to_array, pool_tribe_output, roi_mean_vector
 from .predictor import load_default_predictor, predictor
 from .text_embed import embed_text
 from .transcribe import transcribe
-from .tribe import tribe_service
+from .tribe import MIN_TEXT_WORDS, TooShortInputError, tribe_service
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -76,6 +76,12 @@ async def health() -> models.HealthResponse:
 
 @app.post("/analyze/text", response_model=models.JobAccepted)
 async def analyze_text(req: models.AnalyzeTextRequest) -> models.JobAccepted:
+    word_count = len(req.text.split())
+    if word_count < MIN_TEXT_WORDS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"text must be ≥ {MIN_TEXT_WORDS} words for TRIBE (got {word_count})",
+        )
     job_id = str(uuid.uuid4())
     _JOBS[job_id] = {"mode": "text", "input": {"text": req.text}}
     return models.JobAccepted(job_id=job_id, mode="text", estimated_ms=10_000)
@@ -122,13 +128,21 @@ async def stream(job_id: str) -> EventSourceResponse:
         budgets = {"text": config.TEXT_BUDGET_S, "audio": config.AUDIO_BUDGET_S, "video": config.VIDEO_BUDGET_S}
         yield streaming.started(mode=mode, estimated_ms=int(budgets[mode] * 1000))
 
-        if mode == "text":
-            result = tribe_service.analyze_text(job["input"]["text"])
-        elif mode == "audio":
-            result = tribe_service.analyze_audio(Path(job["input"]["path"]))
-        else:
-            path = Path(job["input"].get("path") or "stub.mp4")
-            result = tribe_service.analyze_video(path)
+        try:
+            if mode == "text":
+                result = tribe_service.analyze_text(job["input"]["text"])
+            elif mode == "audio":
+                result = tribe_service.analyze_audio(Path(job["input"]["path"]))
+            else:
+                path = Path(job["input"].get("path") or "stub.mp4")
+                result = tribe_service.analyze_video(path)
+        except TooShortInputError as exc:
+            yield streaming.error(str(exc))
+            return
+        except Exception as exc:
+            logger.exception("TRIBE analyze failed for job %s", job_id)
+            yield streaming.error(f"analysis failed: {exc}")
+            return
 
         if mode in ("audio", "video"):
             yield streaming.transcript(result.get("transcript", []))
