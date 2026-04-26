@@ -43,6 +43,10 @@ class EngagementPredictor:
         self._model = model
         self._loaded = model is not None
         self.version = version
+        # Held-out R² from the most recent fit. None = untrained / unknown — the
+        # NemoClaw curator (PRD §11.7) treats None as cold-start. R-03's refit
+        # writes a value here; the stub installed by load_default_predictor leaves it None.
+        self.r2: float | None = None
 
     @property
     def loaded(self) -> bool:

@@ -33,7 +33,7 @@ Every writer, editor, marketer, podcaster, founder, and short-form creator ships
 2. The brain output is pooled into a feature vector that we feed to an **engagement-prediction model** trained on public YouTube Shorts paired with their real-world view/like/comment counts and the uploader's follower count. The user sees: *"predicted engagement rate: 8.4% (75th percentile of your account's recent videos)."*
 3. For text mode, a small **Gemma 2B** model reads cold zones and proposes sentence rewrites the user can apply.
 
-The model lives on the box: training data, training run, and inference all on the GX10. An offline scraper (described in §11.4 — `yt-dlp` for the demo build, OpenClaw / NemoClaw browser-agent path on the roadmap) pulls trending Shorts in the background and re-fits the model on each fresh batch.
+The model lives on the box: training data, training run, and inference all on the GX10. An offline scraper (described in §11.4 — `yt-dlp` for the demo build, NemoClaw active-learning agent in §11.7) pulls trending Shorts in the background and re-fits the model on each fresh batch.
 
 Why this only works on this hardware: TRIBE v2 needs ~30GB VRAM with all encoders loaded. The GX10's 128GB unified memory holds TRIBE + Gemma + the predictor + a small training corpus concurrently, with sub-second response paths for text and ~25s for video inference. A laptop cannot hold TRIBE. A cloud API would round-trip the user's draft content — defeating the privacy story creators care about for unreleased work.
 
@@ -99,7 +99,8 @@ Two-tier, fully local during the demo, talking over Tailscale.
 - `corpus.jsonl` of pre-computed `{tribe_features, engagement_rate, followers}` rows — used both for training and as the percentile-rank reference at inference time (~10MB for 200 videos)
 - Whisper-base (~150MB) + `nomic-embed-text-v1.5` (~550MB) loaded at startup for the originality library (§11.6)
 - Per-creator library `cache/library/<creator_id>/*.json` — TRIBE features + transcript embedding + thumbnail per past clip. Loaded on demand into a `creator_id → list[LibraryEntry]` in-memory dict. ~8KB/clip; 10k clips = 80MB.
-- Optional offline batch ingest: `yt-dlp` pulls a trending-Shorts batch → TRIBE runs over each → corpus appends → predictor refits. This is a separate `scripts/refit_predictor.py` invocation, not a service. The roadmap version replaces the cron with an OpenClaw / NemoClaw browser-agent loop.
+- Optional offline batch ingest: `yt-dlp` pulls a trending-Shorts batch → TRIBE runs over each → corpus appends → predictor refits. This is a separate `scripts/refit_predictor.py` invocation, not a service. **The agentic version is spec'd in §11.7 (active-learning corpus curator) — a single NemoClaw agent that runs in the uvicorn lifespan, picks what to scrape next via `yt-dlp ytsearch20:<query>` (no manual URL seed list), targets gaps in the current ridge predictor, and yields to live `/analyze/*` requests via a priority gate. The same agent rotates a "trending" iteration every 6 cycles to fill the pool that powers §11.8 (inspiration feed). NemoClaw chosen over OpenClaw to align with the NVIDIA NeMo stack on the GX10's Blackwell silicon.**
+- Date-partitioned trending pool: `cache/trending/<yyyy-mm-dd>/*.json` — same TRIBE-pooled + transcript-embedding shape as a library entry. Refreshed every ~6h by the curator, 7-day TTL. Powers the inspiration feed (§11.8).
 - Total resident: ~36-42GB of 128GB (TRIBE + Gemma + Whisper + nomic + corpus + creator libraries). The remaining ~85GB is room for very large creator libraries — a creator with 5,000 past clips fits with multiple GB to spare.
 
 ---
@@ -271,7 +272,7 @@ gx10/
 │   ├── prerender_heroes.py  # Pre-hack PH-E/F/G
 │   ├── ingest_shorts.py     # yt-dlp pull → TRIBE → corpus.jsonl append (PH-I)
 │   ├── fit_predictor.py     # Read corpus.jsonl → fit ridge → write engagement_predictor.pkl (PH-J)
-│   └── refit_predictor.py   # Cron entrypoint: ingest a fresh batch → re-fit. Roadmap: replace cron with OpenClaw agent.
+│   └── refit_predictor.py   # Cron entrypoint: ingest a fresh batch → re-fit. Roadmap: replaced by NemoClaw curator (§11.7).
 ├── cache/
 ├── tests/
 │   └── test_smoke.py
@@ -486,7 +487,7 @@ pooling.pool_tribe_output(...) → 25-dim vector
 append row to corpus.jsonl
 ```
 
-Demo path = `yt-dlp` + manual URL list. **Roadmap path = an OpenClaw or NemoClaw browser-agent that runs on the GX10 alongside TRIBE, navigates to a trending Shorts page, harvests N URLs autonomously, runs the same pipeline, then triggers `refit_predictor.py`.** The agent is the future-tense story for judges — it does not need to actually run during the demo.
+Demo path = `yt-dlp` + manual URL list. **Real path (spec'd in §11.7) = a single NemoClaw agent running in the uvicorn lifespan, discovering URLs autonomously via `yt-dlp ytsearch20:<query>` (no manual seed list), targeting predictor gaps, refitting in-process with R²-rollback. Replaces the cron entirely.** The agent is the demo's "the box gets smarter on its own" line — and the same agent rotates a trending iteration every 6 cycles to power §11.8 (inspiration feed).
 
 ### 11.5 Text-mode rewrite suggestions
 
@@ -548,6 +549,149 @@ This is the second pillar of the pitch. Engagement prediction asks *"will this w
 - Upload 5+ hero library clips → POST /similarity for a fresh draft → returns 3 matches with non-trivial ROI breakdown variance (not all 1.0, not all 0.0).
 - Library size 0–4 → endpoint returns the cold-start message; frontend hides panel.
 - Same draft uploaded twice → top match is itself with score ~1.0 (sanity check).
+
+### 11.7 Active-learning corpus curator (idle-time agent on GX10)
+
+The GX10 is idle ≥95% of the time outside live demo windows. Instead of letting it sit, **a single NemoClaw agent runs an active-learning loop** that grows the engagement-prediction corpus on its own — and chooses *what* to ingest based on where the current ridge model is weakest. NemoClaw (NVIDIA NeMo-stack agent framework) is the right choice for this hackathon: the GX10 is Blackwell silicon, the ASUS challenge is partnered with NVIDIA, and "we run a NemoClaw agent on the Blackwell box" is a one-line judging signal that ties the hardware to the agent layer.
+
+**One agent, two iteration types (rotating).** Same loop, same TRIBE pipeline; only the terminal step differs:
+
+| Iteration type | Frequency | Terminal step |
+|---|---|---|
+| **Corpus** (active-learning) | 5 of every 6 | Append features → `corpus.jsonl`, refit ridge, R²-rollback if regressed |
+| **Trending** (inspiration pool) | 1 of every 6 | Write features → `cache/trending/<yyyy-mm-dd>/<id>.json` (powers §11.8) |
+
+Splitting into two agents would mean two priority gates fighting one TRIBE handle, two log files, two failure modes — for zero benefit (TRIBE GPU is single-tenant). One coroutine, one log, one status endpoint, one kill switch.
+
+**The loop** (one iteration ≈ 30–60 min, paused entirely when any job is in flight):
+
+```
+0. Iteration type
+   type = "trending" if iter_count % 6 == 5 else "corpus"
+
+1. Priority gate
+   if any _JOBS in PROCESSING/STREAMING:  sleep(30); continue
+
+2. Query selection (see "How the agent knows what to scrape" below)
+   queries = pick_queries(type, corpus, predictor, query_pool)
+
+3. URL discovery (yt-dlp ytsearch — no manual seed list)
+   for q in queries:
+     urls += yt-dlp(f"ytsearch20:{q}", metadata_only=True)
+   filter: duration ≤ 180s, view_count > 1000, is_short, not in corpus or trending
+   pick top N (3-5) matching the gap criteria
+
+4. Feature extractor (existing pipeline)
+   yt-dlp -f mp4 → tribe.predict → pooling.pool_tribe_output (+ Whisper + nomic for trending)
+   delete the mp4 (raw video never retained — same rule as §11.6)
+
+5. Terminal step (depends on iteration type)
+   if type == "corpus":
+     append row to corpus.jsonl
+     refit predictor in-process; if R² regresses > 0.02 → rollback pickle, mark rows excluded=true
+   else:  # trending
+     write to cache/trending/<yyyy-mm-dd>/<video_id>.json (date-partitioned, 7d TTL)
+
+6. Log + bookkeeping
+   append to cache/curator_log.jsonl
+   if iteration produced a high-engagement clip: feed transcript → Gemma → enrich query pool
+```
+
+**How the agent knows what to scrape (no `seed_urls.txt` ever):**
+
+URL discovery is fully autonomous via `yt-dlp ytsearch20:<query>` — yt-dlp's search prefix takes any query string and returns the top 20 matching Shorts URLs with metadata. No API key, no manual list. The only state the agent needs is *what to search for*, which comes from three sources used in priority order:
+
+1. **Bootstrap queries** (cold start: predictor R² < 0.05 OR corpus < 100 rows)
+   - Hardcoded `BOOTSTRAP_QUERIES` constant in `curator_gap.py` — ~12 diverse niches: `cooking shorts`, `fitness shorts`, `explainer shorts`, `comedy shorts`, `beauty tutorial shorts`, `gaming clip shorts`, `dance shorts`, `asmr shorts`, `pitch shorts`, `lifestyle shorts`, `science shorts`, `motivation shorts`.
+   - Sampled uniformly until the predictor has enough signal to identify gaps.
+
+2. **Gap-driven queries** (warm predictor)
+   - Gap-finder emits a `GapDescriptor`: per-bin `predicted-rate variance × (1 / bin density)` over the corpus → identify the weakest bin.
+   - Gemma 2B prompt: *"You are picking YouTube Shorts to fill a gap in a training set. Gap: `<descriptor>`. Output 5 short search queries, one per line, no commentary."* → 5 queries.
+   - Example gap → queries: `"high-engagement (>20%) + heavy auditory ROI"` → `["viral asmr cooking shorts", "soundtrack hooks tiktok shorts", "audio meme shorts trending", "voiceover storytelling shorts", "music drop shorts"]`.
+
+3. **Self-supervised query expansion** (continuous)
+   - After every successful corpus iteration, Gemma summarizes the transcripts of top-quartile engagement clips into 1-2 candidate queries (*"these high-engagement clips are all about X — generate 2 search queries on that theme"*).
+   - Appended to `cache/curator_query_pool.jsonl` (rolling cap of 200, FIFO).
+   - Sampled with low probability (~10%) per iteration alongside bootstrap/gap queries — the agent learns its own search vocabulary over time without ever hardcoding niche-specific terms.
+
+**Trending iteration queries** rotate across a fixed list — `["#shorts trending today", "#shortsoftheday viral", "#fyp shorts", "trending shorts this week", "viral shorts today"]` — same `ytsearch20:` mechanism, no separate API.
+
+**State:**
+- Driver: `gx10/brain/curator.py` — long-running asyncio coroutine started by uvicorn lifespan, stopped on shutdown.
+- Append-only log: `gx10/cache/curator_log.jsonl` — one row per iteration `{ts, type, queries, n_added, r2_before, r2_after, excluded}`.
+- Query pool: `gx10/cache/curator_query_pool.jsonl` — self-supervised query expansions (capped at 200).
+- Status endpoint: `GET /curator/status` → `{running, last_iter_at, last_iter_type, corpus_size, trending_pool_size, last_r2, paused_for_jobs, kill_switch}`. The frontend StatusChip surfaces `last_r2` + `corpus_size` + `trending_pool_size` on hover.
+- Kill switch: `touch cache/curator.disabled` → loop exits at next iteration.
+
+**Coordination with live inference:**
+- Single shared `tribe_model` instance — curator does **not** load a second copy.
+- Iteration begins with a memory-release call (Apple unified-memory equivalent of `torch.cuda.empty_cache`).
+- `if any _JOBS in PROCESSING/STREAMING: sleep(30)` is the only synchronization. No locks.
+
+**Failure modes:**
+- yt-dlp breaks (rate-limit or schema change) → log + skip iteration. Don't crash the server.
+- Source returns nothing → fall back to a static seed query list at `cache/curator_seed_queries.json`.
+- TRIBE OOM → release memory, halve `n_per_iter`, retry next iteration.
+- Predictor R² regression → keep the rows but mark `excluded=true`, roll back the pickle.
+
+**Verification:**
+- Start curator with 50-row seed → after 4 iterations corpus grows by ≥ 40 rows; log shows `r2_after > r2_before` on at least 2 iterations.
+- Start a `/analyze/video` job mid-iteration → curator pauses within 30s; live request completes in baseline latency (no slowdown vs. curator-disabled run).
+- `touch cache/curator.disabled` → `GET /curator/status` returns `running: false` within one iteration.
+
+**Demo line:** *"the box gets smarter on its own — even when you're not using it."*
+
+### 11.8 Trending inspiration feed (the third pillar)
+
+Engagement prediction asks *"will this work?"*. Originality search asks *"am I repeating myself?"*. The inspiration feed answers the third creator question: **"what should I make next?"**
+
+Same TRIBE pipeline + same cosine fusion as §11.6, different candidate pool. The curator (§11.7) is the harvester; this section spec'es the consumer side.
+
+**v1 scope: YouTube Shorts only.** TikTok and Reels lack public trending APIs and require third-party aggregators that break weekly. Out for v1.
+
+**Pool lifecycle:**
+1. The same NemoClaw agent from §11.7 — running a "trending" iteration once every 6 iterations — hits `yt-dlp ytsearch20:<trending-query>` rotating across `["#shorts trending today", "#shortsoftheday viral", "#fyp shorts", ...]`. No separate agent, no manual URL list.
+2. For each candidate: TRIBE-pool + Whisper transcript + nomic embedding. Same shape as a library entry, **stored at `cache/trending/<yyyy-mm-dd>/<video_id>.json`** (date-partitioned for easy expiry).
+3. Pool TTL: 7 days. A nightly cleanup deletes folders older than 7 days from `cache/trending/`.
+4. Memory budget: ~100 trending clips × 8KB ≈ 800KB. Negligible.
+
+**Inference flow (`GET /inspiration/{creator_id}`):**
+1. Load creator library (same in-memory dict as §11.6).
+2. Compute creator **centroid**:
+   - `centroid_brain` = L2-normalized mean of `tribe_pooled` across library entries.
+   - `centroid_text` = L2-normalized mean of `text_embedding` across library entries.
+3. For each trending pool entry: `score = α · cos(centroid_brain, brain_pool) + (1-α) · cos(centroid_text, text_pool)`, α = 0.6 (reuses `SIMILARITY_BRAIN_WEIGHT`).
+4. Rank, return top-K with thumbnail + source URL + per-ROI breakdown.
+5. Response shape:
+   ```json
+   {"recommendations": [
+     {"video_id": "...", "score": 0.78, "thumbnail_url": "...",
+      "source_url": "https://youtube.com/shorts/...",
+      "uploaded_at": "...", "creator_handle": "...",
+      "view_count": 1240000, "engagement_rate": 0.184,
+      "dominant_roi": "auditory",
+      "roi_breakdown": {"visual": 0.64, "auditory": 0.91, "language": 0.72}}
+   ], "library_size": 47, "trending_pool_size": 96, "centroid_age_s": 3600}
+   ```
+6. Cold-start: library < `SIMILARITY_MIN_LIBRARY_SIZE` (5) → `{recommendations: [], library_size: N, message: "upload at least 5 past clips"}`.
+
+**Source-URL hygiene:**
+- Store the canonical Shorts URL — never the mp4. Raw video deleted post-ingest (same rule as §11.7).
+- Thumbnails: store the YouTube-hosted URL (`https://i.ytimg.com/vi/<id>/hqdefault.jpg`). If the source video is deleted, the thumbnail 404s gracefully — the UI handles `onError` with a placeholder.
+
+**Frontend (`InspirationFeed.tsx` on `/library`):**
+- Section below the past-clips table — **"trending Shorts that match your style"**.
+- 3 cards horizontally: thumbnail + dominant-ROI chip + similarity score (e.g., *"78% match · auditory"*).
+- Each card links out to the source URL in a new tab.
+- Hidden during cold-start.
+
+**Verification:**
+- Trending pool ≥ 50 entries + library ≥ 5 → `GET /inspiration/demo` returns 3 cards with scores in 0.4–0.9 range (no all-1.0 self-matches because trending pool is disjoint from creator library).
+- Library = 0 → cold-start message; frontend hides the section.
+- 7-day-old `cache/trending/<date>/` folder → nightly cleanup deletes it; `cache/trending/` shows ≤ 7 dated subfolders.
+
+**Why this is the third pillar:** the same TRIBE pooling + cosine math powers all three creator questions. One inference pipeline, three demo lines: *"is this good? have I made it before? what should I make next?"*
 
 ---
 

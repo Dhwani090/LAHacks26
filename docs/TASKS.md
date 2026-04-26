@@ -138,7 +138,7 @@
   "
   # n ≥ 50, feature dims = 21, sane min/median/max.
   ```
-- **Out of scope:** the predictor itself (PH-J), live ingest endpoint, OpenClaw agent
+- **Out of scope:** the predictor itself (PH-J), live ingest endpoint, NemoClaw curator (Phase R)
 
 ### PH-J · Fit v0 engagement predictor (ridge)
 - **Owner:** PH-B owner
@@ -472,11 +472,71 @@
 ### P3-09 · OPTIONAL: scraper-agent demo stub
 - **Only if hours 14–16 free**
 - **References:** `@docs/PRD.md#§11.4`, `@.claude/skills/engagement-prediction/SKILL.md`
-- **Files to create:** `cortex/gx10/scripts/refit_predictor.py`, screenshot/video of the OpenClaw or NemoClaw agent navigating to YouTube Shorts trending and harvesting URLs (does not need to actually run during the demo)
+- **Files to create:** `cortex/gx10/scripts/refit_predictor.py`, screenshot/video of the NemoClaw agent navigating to YouTube Shorts trending and harvesting URLs (does not need to actually run during the demo — superseded by Phase R for the real implementation)
 - **Action:** wire the cron-style entrypoint that runs `ingest_shorts.py` against a fresh URL list, then `fit_predictor.py`. Record a 30s loom of the agent path for the Devpost video.
 - **Verification:** running `python scripts/refit_predictor.py path/to/urls.txt` end-to-end appends new rows + writes a new pickle.
 
 > 🛑 **PHASE 3 GATE — SCOPE FREEZE.** From hour 18: bug fixes only.
+
+---
+
+## Phase R — NemoClaw curator + inspiration feed (parallel track)
+
+These extend `P3-09 scraper-agent stub` into a real **NemoClaw active-learning curator** (PRD §11.7) and the **trending inspiration feed** (PRD §11.8) — the third demo pillar (*"what should I make next?"*).
+
+**Architecture:** one agent, one loop, two iteration types rotating 5:1 (corpus active-learning : trending pool). No `seed_urls.txt` — query discovery is bootstrap → gap-driven Gemma queries → self-supervised expansion (PRD §11.7 "How the agent knows what to scrape").
+
+**Scope rules:**
+- Phase R does **not** gate the demo path. The curator runs only when `cache/curator.enabled` exists; it's off by default for Phase 0–3.
+- Strict dependency order: R-01 → R-02 → R-03 (corpus iteration end-to-end) → R-04 (trending iteration mode added to the same loop) → R-05 (endpoint) → R-06 (UI).
+- If running into the Phase 3 scope freeze without R-XX done, downgrade that step to "demo-able stub" — one successful end-to-end iteration recorded as a 30s loom.
+- The /inspiration UI lives on `/library` (where the centroid is computed). Do **not** add it to `/predict`.
+
+### R-01 · Backend `curator.py` skeleton + uvicorn lifespan ✅
+- **References:** `@docs/PRD.md#§11.7`
+- **Files to create:** `cortex/gx10/brain/curator.py` ✅
+- **Files to modify:** `cortex/gx10/brain/main.py` (lifespan spawn/cancel + `_active_streams` counter + `try/finally` around `/stream/{job_id}` + `GET /curator/status`) ✅
+- **Action:** asyncio coroutine — priority gate (sleep if `_active_streams > 0`), iteration-type rotation (`type = "trending" if iter_count % 6 == 5 else "corpus"`), no-op iteration body for now, opt-in master gate (`cache/curator.enabled`) + kill-switch precedence (`cache/curator.disabled` wins), `GET /curator/status` endpoint.
+- **Verification:** `pytest tests/test_curator.py -v` → 8/8 pass (rotation, gate-file precedence, priority gate, lifespan cancellation, status-endpoint shape). Full suite: 54/54 pass. Manual on GX10 (deferred): `bash scripts/01_start_brain.sh` → `curl /curator/status` returns `{running: true, ...}` only after `touch cache/curator.enabled`.
+- **Notes for R-02/R-03:** `_active_streams` is a module-level int incremented in the `/stream/{job_id}` generator's `try/finally`. Iteration body in `_run_iteration` is a logging no-op — R-02 wires query selection, R-03 wires scrape+refit. When R-03 calls TRIBE/Whisper, route through `asyncio.to_thread(...)` to avoid stalling live `/analyze/video`.
+
+### R-02 · Query selection — bootstrap + gap-finder + Gemma + self-expansion ✅
+- **References:** `@docs/PRD.md#§11.7` "How the agent knows what to scrape", `@.claude/skills/engagement-prediction/SKILL.md`
+- **Files to create:** `cortex/gx10/brain/curator_gap.py` ✅ (with `BOOTSTRAP_QUERIES` + `TRENDING_QUERIES` constants); `cortex/gx10/cache/curator_query_pool.jsonl` (auto-created at runtime by R-03)
+- **Files to modify:** `cortex/gx10/brain/gemma.py` (added `GemmaService.generate(prompt, max_new_tokens)` with `CORTEX_STUB_GEMMA=1` deterministic stub) ✅; `cortex/gx10/brain/predictor.py` (added `r2: float | None` field, default None means cold-start) ✅; `cortex/gx10/brain/config.py` (8 curator constants: cold-start thresholds, query counts per iteration, pool sample rate, query pool path) ✅
+- **Action:** `pick_queries(iter_type, corpus, predictor, gemma, query_pool_path, rng)` — three-source priority logic:
+  1. cold start (R² < 0.05 OR corpus < 100) → sample from `BOOTSTRAP_QUERIES` (3/iter)
+  2. warm predictor → density-only `find_gap` → Gemma prompt → 5 queries (R-03 will swap density-only for residual-variance)
+  3. ~10% of iterations → augment with one query from `curator_query_pool.jsonl`
+  Trending iterations always use `TRENDING_QUERIES` (1/iter).
+- **Verification:** `pytest tests/test_curator_gap.py -v` → 16/16 pass (constants, cold-start gate × 5, gap-finder × 3, gemma_translate stub + fallback, pick_queries × 5). Full suite: 70/70 pass.
+- **Notes for R-03:** density-only gap-finder is a placeholder — TODO marker at `curator_gap.find_gap` to swap for per-bin residual-variance once `predictor.predict()` runs against the corpus held-out set. R-03 also needs to *write* to `curator_query_pool.jsonl` (Gemma summarizes top-quartile transcripts → append). When calling `gemma.generate()` from the curator coroutine, route through `asyncio.to_thread()` to avoid stalling the event loop.
+
+### R-03 · URL discovery + scraper + feature extractor + refit + rollback (corpus iteration)
+- **References:** `@docs/PRD.md#§11.7` steps 3-6
+- **Files to modify:** `cortex/gx10/brain/curator.py` (wire corpus iteration end-to-end), `cortex/gx10/scripts/fit_predictor.py` (expose `fit_predictor()` as importable function, not just CLI)
+- **Action:** for each query → `yt-dlp ytsearch20:<query>` metadata-only → filter (≤180s, views > 1000, is_short, dedupe vs. corpus) → pick top 3-5 → download mp4 → TRIBE pipeline → append `corpus.jsonl` → in-process refit → if `r2_after - r2_before < -0.02`, mark new rows `excluded=true` and restore prior pickle → delete mp4. Append iteration row to `cache/curator_log.jsonl`. After successful iterations, summarize top-quartile transcripts via Gemma → append to `curator_query_pool.jsonl` (capped at 200).
+- **Verification:** start with 50-row seed corpus → run 3 corpus iterations on GX10 → corpus ≥ +30 rows, `curator_log.jsonl` has 3 entries with R² before/after, no mp4 files left in `cache/`. `/analyze/video` job started mid-iteration → completes in baseline latency. `curator_query_pool.jsonl` grows.
+
+### R-04 · Trending iteration mode (same loop, different terminal step)
+- **References:** `@docs/PRD.md#§11.8`
+- **Files to modify:** `cortex/gx10/brain/curator.py` (when `type == "trending"`, route to trending terminal step instead of corpus), `cortex/gx10/brain/library.py` (reuse `LibraryEntry` shape for trending entries)
+- **Files to create:** `cortex/gx10/cache/trending/<yyyy-mm-dd>/` (date-partitioned)
+- **Action:** trending iteration uses `TRENDING_QUERIES` for `pick_queries`, runs same yt-dlp + TRIBE + Whisper + nomic pipeline as a library upload, writes to `cache/trending/<today>/<video_id>.json` instead of `corpus.jsonl`. Nightly cleanup deletes folders > 7 days. Status endpoint exposes `trending_pool_size`.
+- **Verification:** force `iter_count=5` on GX10 → trending iteration runs → ≥ 3 JSONs at `cache/trending/<today>/*.json` with `LibraryEntry` shape (TRIBE-pooled + transcript + nomic embedding). Cleanup test: create fake `cache/trending/2025-01-01/` → run cleanup → folder is gone.
+
+### R-05 · Backend `GET /inspiration/{creator_id}` endpoint
+- **References:** `@docs/PRD.md#§11.8`
+- **Files to modify:** `cortex/gx10/brain/main.py`, `cortex/gx10/brain/library.py` (add `compute_centroid`, `rank_against_pool`)
+- **Action:** load creator library → compute L2-normed centroid (brain + text) → cosine-fuse against all entries in `cache/trending/<all-dates>/` → top-3 with thumbnail + source URL + ROI breakdown. Cold-start (library < 5) → message + empty list.
+- **Verification:** unit tests in `tests/test_inspiration.py` — library ≥ 5 + trending pool ≥ 50 → 3 recommendations with score 0.4–0.9 range. Library = 0 → cold-start message. Trending pool empty → message indicating curator hasn't harvested yet.
+
+### R-06 · Frontend `InspirationFeed.tsx` on /library
+- **References:** `@docs/PRD.md#§11.8`
+- **Files to create:** `cortex/web/src/app/components/InspirationFeed.tsx`
+- **Files to modify:** `cortex/web/src/app/library/page.tsx` (mount feed below the clips table), `cortex/web/src/app/lib/brainClient.ts` (add `getInspiration`), `cortex/web/src/app/lib/types.ts` (add `InspirationResponse`)
+- **Action:** 3 cards horizontally — thumbnail + dominant-ROI chip + score + outbound link (target=_blank). Hidden during cold-start. `onError` thumbnail fallback for deleted source videos.
+- **Verification:** `npm run typecheck && npm run build` clean. With stub backend returning 3 recs, `/library` shows the section with 3 cards. Library = 0 → section hidden.
 
 ---
 

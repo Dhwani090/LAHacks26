@@ -156,3 +156,20 @@ class LibraryFromJobRequest(BaseModel):
     creator_id: str = Field(..., min_length=1, max_length=64)
     # Optional override; defaults to a name derived from the original upload filename.
     video_id: str | None = Field(default=None, max_length=128)
+
+
+class CuratorStatusResponse(BaseModel):
+    """Status of the NemoClaw curator (PRD §11.7).
+
+    Forward-compatible shape — R-01 fills in `running` / iter counters / kill-switch
+    state; R-02/R-03/R-04 populate `last_r2`, `corpus_size`, `trending_pool_size`."""
+    running: bool
+    enabled: bool  # cache/curator.enabled present
+    kill_switch: bool  # cache/curator.disabled present (vetoes enabled)
+    paused_for_jobs: bool
+    iter_count: int
+    last_iter_at: str | None = None
+    last_iter_type: Literal["corpus", "trending"] | None = None
+    corpus_size: int = 0
+    trending_pool_size: int = 0
+    last_r2: float | None = None
