@@ -115,6 +115,20 @@ export const brainClient = {
     return postForm<LibraryUploadResponse>('/library/upload', fd, signal);
   },
 
+  addJobToLibrary(
+    jobId: string,
+    creatorId: string,
+    videoId?: string,
+    signal?: AbortSignal,
+  ): Promise<LibraryUploadResponse> {
+    const body: { job_id: string; creator_id: string; video_id?: string } = {
+      job_id: jobId,
+      creator_id: creatorId,
+    };
+    if (videoId && videoId.trim()) body.video_id = videoId.trim();
+    return postJson<LibraryUploadResponse>('/library/from-job', body, signal);
+  },
+
   async getLibrary(creatorId: string, signal?: AbortSignal): Promise<LibraryListResponse> {
     const res = await fetch(url(`/library/${encodeURIComponent(creatorId)}`), { signal });
     if (!res.ok) throw new BrainClientError(`/library/${creatorId} → ${res.status}`);

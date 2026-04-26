@@ -12,6 +12,7 @@ import { TUNING } from '../lib/tuning';
 import { useAppState } from '../state/AppState';
 import type { ColdZone, EngagementCurves, TranscriptWord } from '../lib/types';
 import { DEMO_CREATOR_ID } from '../lib/creator';
+import { AddToLibraryButton } from './AddToLibraryButton';
 import { EngagementCard } from './EngagementCard';
 import { EngagementTimeline } from './EngagementTimeline';
 import { SimilarityPanel } from './SimilarityPanel';
@@ -158,6 +159,14 @@ export function VideoSurface() {
 
         {status === 'complete' && jobId && (
           <SimilarityPanel jobId={jobId} creatorId={DEMO_CREATOR_ID} />
+        )}
+
+        {status === 'complete' && jobId && (
+          <AddToLibraryButton
+            jobId={jobId}
+            creatorId={DEMO_CREATOR_ID}
+            defaultName={file?.name?.replace(/\.[^.]+$/, '') ?? undefined}
+          />
         )}
       </div>
 
