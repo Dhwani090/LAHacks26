@@ -10,6 +10,7 @@ import type {
   EditSuggestion,
   LibraryListResponse,
   LibraryUploadResponse,
+  PredictEngagementResponse,
   SimilarityResponse,
   TranscriptWord,
 } from './types';
@@ -90,6 +91,18 @@ export const brainClient = {
     return postJson('/apply-suggestion', { clip_id: clipId, suggestion_id: suggestionId, action }, signal);
   },
 
+  predictEngagement(
+    jobId: string,
+    followers: number,
+    signal?: AbortSignal,
+  ): Promise<PredictEngagementResponse> {
+    return postJson<PredictEngagementResponse>(
+      '/predict-engagement',
+      { job_id: jobId, followers },
+      signal,
+    );
+  },
+
   // §11.6 — creator library + originality search.
   uploadLibraryEntry(
     creatorId: string,
@@ -100,6 +113,20 @@ export const brainClient = {
     fd.append('creator_id', creatorId);
     fd.append('file', file);
     return postForm<LibraryUploadResponse>('/library/upload', fd, signal);
+  },
+
+  addJobToLibrary(
+    jobId: string,
+    creatorId: string,
+    videoId?: string,
+    signal?: AbortSignal,
+  ): Promise<LibraryUploadResponse> {
+    const body: { job_id: string; creator_id: string; video_id?: string } = {
+      job_id: jobId,
+      creator_id: creatorId,
+    };
+    if (videoId && videoId.trim()) body.video_id = videoId.trim();
+    return postJson<LibraryUploadResponse>('/library/from-job', body, signal);
   },
 
   async getLibrary(creatorId: string, signal?: AbortSignal): Promise<LibraryListResponse> {

@@ -105,9 +105,17 @@ async def analyze_video(
         tmp_path.parent.mkdir(parents=True, exist_ok=True)
         with tmp_path.open("wb") as f:
             f.write(await file.read())
-        _JOBS[job_id] = {"mode": "video", "input": {"path": str(tmp_path)}}
+        _JOBS[job_id] = {
+            "mode": "video",
+            "input": {"path": str(tmp_path)},
+            "source_name": file.filename or "draft.mp4",
+        }
     else:
-        _JOBS[job_id] = {"mode": "video", "input": {"cloudinary_public_id": cloudinary_public_id}}
+        _JOBS[job_id] = {
+            "mode": "video",
+            "input": {"cloudinary_public_id": cloudinary_public_id},
+            "source_name": cloudinary_public_id or "draft",
+        }
     return models.JobAccepted(job_id=job_id, mode="video", estimated_ms=45_000)
 
 
@@ -282,6 +290,58 @@ async def library_upload(
     return models.LibraryUploadResponse(
         library_entry_id=video_id,
         library_size=library_registry.size(creator_id),
+    )
+
+
+@app.post("/library/from-job", response_model=models.LibraryUploadResponse)
+async def library_from_job(req: models.LibraryFromJobRequest) -> models.LibraryUploadResponse:
+    """Add a completed /analyze/video job to the creator's library without
+    re-running TRIBE+Whisper. Reuses the pooled features, ROI means, and
+    transcript embedding cached in _JOBS during /stream.
+
+    Use case: user uploaded a draft to /predict, watched the brain pulse,
+    decided it's worth posting, hits "Add to Library." We've already paid
+    for inference — no reason to do it twice.
+    """
+    if not req.creator_id.strip():
+        raise HTTPException(status_code=400, detail="creator_id required")
+    job = _JOBS.get(req.job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="unknown job_id")
+    if job.get("mode") != "video":
+        raise HTTPException(status_code=400, detail="library entries are video-only")
+
+    pooled = job.get("pooled_features")
+    roi_means = job.get("roi_means")
+    if not pooled or not roi_means:
+        raise HTTPException(status_code=409, detail="job has no pooled features yet — wait for /stream complete")
+
+    source_name = job.get("source_name") or "draft.mp4"
+    derived_id = Path(source_name).stem or req.job_id[:12]
+    video_id = (req.video_id or derived_id).strip() or req.job_id[:12]
+
+    transcript_text = job.get("transcript_text") or ""
+    text_emb = job.get("text_embedding")
+    if text_emb is not None:
+        text_vec_arr = list(text_emb)
+    else:
+        text_vec_arr = embed_text(transcript_text).tolist()
+
+    import numpy as np
+    entry = LibraryEntry(
+        video_id=video_id,
+        uploaded_at=now_iso(),
+        duration_s=float(job.get("duration_s") or 0.0),
+        tribe_pooled=np.asarray(pooled, dtype=np.float32),
+        roi_means=np.asarray(roi_means, dtype=np.float32),
+        transcript=transcript_text,
+        text_embedding=np.asarray(text_vec_arr, dtype=np.float32),
+        thumbnail_url=None,
+    )
+    library_registry.save_entry(req.creator_id, entry)
+    return models.LibraryUploadResponse(
+        library_entry_id=video_id,
+        library_size=library_registry.size(req.creator_id),
     )
 
 

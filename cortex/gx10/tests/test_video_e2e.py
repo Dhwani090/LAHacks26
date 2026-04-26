@@ -174,6 +174,61 @@ def test_library_upload_idempotent_for_same_filename(client, tmp_path):
     assert second["library_size"] == 1
 
 
+def test_library_from_job_adds_completed_draft(client, tmp_path):
+    """User-flow: /analyze/video → /stream complete → POST /library/from-job
+    → entry exists in library. No re-run of TRIBE/Whisper required."""
+    library_registry.root = tmp_path / "library"
+    library_registry.reset()
+
+    job_id = _video_job_completed(client, name="my_draft.mp4")
+    r = client.post(
+        "/library/from-job",
+        json={"job_id": job_id, "creator_id": "eve"},
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["library_entry_id"] == "my_draft"
+    assert body["library_size"] == 1
+
+    listing = client.get("/library/eve").json()
+    assert listing["size"] == 1
+    assert listing["entries"][0]["video_id"] == "my_draft"
+    assert listing["entries"][0]["duration_s"] > 0
+
+
+def test_library_from_job_rejects_unknown_job(client, tmp_path):
+    library_registry.root = tmp_path / "library"
+    library_registry.reset()
+    r = client.post(
+        "/library/from-job",
+        json={"job_id": "no-such-job", "creator_id": "x"},
+    )
+    assert r.status_code == 404
+
+
+def test_library_from_job_rejects_text_job(client, tmp_path):
+    library_registry.root = tmp_path / "library"
+    library_registry.reset()
+    text_job = client.post("/analyze/text", json={"text": "hi"}).json()["job_id"]
+    r = client.post(
+        "/library/from-job",
+        json={"job_id": text_job, "creator_id": "x"},
+    )
+    assert r.status_code == 400
+
+
+def test_library_from_job_honors_custom_video_id(client, tmp_path):
+    library_registry.root = tmp_path / "library"
+    library_registry.reset()
+    job_id = _video_job_completed(client, name="anything.mp4")
+    r = client.post(
+        "/library/from-job",
+        json={"job_id": job_id, "creator_id": "frank", "video_id": "renamed_clip"},
+    )
+    assert r.status_code == 200
+    assert r.json()["library_entry_id"] == "renamed_clip"
+
+
 def test_library_upload_does_not_persist_mp4(client, tmp_path):
     """PRD §11.6 invariant: the library is brain-features-only — raw mp4s are
     deleted after the TRIBE+Whisper pipeline runs. The on-disk JSON sidecar is

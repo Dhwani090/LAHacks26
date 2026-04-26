@@ -130,3 +130,10 @@ class LibraryListResponse(BaseModel):
 class LibraryUploadResponse(BaseModel):
     library_entry_id: str
     library_size: int
+
+
+class LibraryFromJobRequest(BaseModel):
+    job_id: str
+    creator_id: str = Field(..., min_length=1, max_length=64)
+    # Optional override; defaults to a name derived from the original upload filename.
+    video_id: str | None = Field(default=None, max_length=128)
