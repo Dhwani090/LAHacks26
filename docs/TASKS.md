@@ -4,7 +4,7 @@
 >
 > **One task per session.** `/clear` between tasks. Mark ✅ only when verification passes.
 >
-> **Skills:** if a task touches TRIBE inference, Niivue rendering, or auto-improve orchestration, load the matching skill from `@.claude/skills/` first.
+> **Skills:** if a task touches TRIBE inference or Niivue rendering, load the matching skill from `@.claude/skills/` first.
 
 ---
 
@@ -97,23 +97,66 @@
   # Must output: 5
   ```
 
-### PH-H · Pre-render 2 auto-improve V1→V2→V3 sequences
-- **Owner:** PH-B owner
-- **References:** `@.claude/skills/auto-improve/SKILL.md` (read FIRST)
-- **Files to create:** `cortex/gx10/cache/auto_improve/<slug>/v{1,2,3}.{json,mp4}` for 2 hero clips
-- **Action:** for each of 2 video clips: run TRIBE on V1, have Gemma pick a cut, ffmpeg apply it for V2, run TRIBE on V2, repeat for V3. Cache full sequence.
+### PH-I · Build the 50-video YT Shorts seed corpus
+- **Owner:** PH-B owner (model owner)
+- **References:** `@docs/PRD.md#§11.3,§11.4`, `@.claude/skills/engagement-prediction/SKILL.md` (load FIRST)
+- **Files needed:** `cortex/gx10/scripts/seed_urls.txt` (hand-curated — 10 URLs each across 5 niches: cooking / explainer / pitch / comedy / fitness). Output lands in `cortex/gx10/cache/corpus.jsonl`.
+- **Two ingest paths — pick one:**
+
+  **Path A — One-machine (GX10 has yt-dlp + TRIBE):**
+  1. `pip install yt-dlp scikit-learn`
+  2. `python scripts/ingest_shorts.py scripts/seed_urls.txt`
+     - For each URL: yt-dlp metadata + mp4 → TRIBE → pool → append row
+  3. Idempotent: re-running skips ids already in `corpus.jsonl`
+
+  **Path B — Mac+GX10 split (recommended when the GX10 is busy):**
+  1. **On the Mac**, while the GX10 is occupied:
+     ```bash
+     pip install yt-dlp
+     python scripts/download_shorts.py scripts/seed_urls.txt --out-dir downloads/
+     ```
+     Writes `<id>.mp4` + `<id>.meta.json` per URL. No TRIBE needed. Idempotent.
+  2. **Transfer:**
+     ```bash
+     rsync -avz --progress downloads/ gx10:~/cortex_downloads/
+     ```
+     ~750 MB for 50 clips → typically <2 min over Tailscale WireGuard.
+  3. **On the GX10**, when free:
+     ```bash
+     python scripts/process_downloads.py --in-dir ~/cortex_downloads/
+     ```
+     For each `<id>.mp4` + sidecar JSON: TRIBE → pool → append. Skips ids already in corpus.
 - **Verification:**
   ```bash
-  for slug in khan startup; do
-    test -f cortex/gx10/cache/auto_improve/$slug/v1.json
-    test -f cortex/gx10/cache/auto_improve/$slug/v2.json
-    test -f cortex/gx10/cache/auto_improve/$slug/v3.json
-    test -f cortex/gx10/cache/auto_improve/$slug/v2.mp4
-    test -f cortex/gx10/cache/auto_improve/$slug/v3.mp4
-  done && echo "ALL FILES PRESENT"
-  # Must print: ALL FILES PRESENT
+  wc -l cortex/gx10/cache/corpus.jsonl  # Must be ≥ 50
+  python -c "
+  import json
+  rows = [json.loads(l) for l in open('cortex/gx10/cache/corpus.jsonl')]
+  rates = sorted(r['engagement_rate'] for r in rows)
+  print(f'n={len(rows)} min={rates[0]:.3f} median={rates[len(rates)//2]:.3f} max={rates[-1]:.3f}')
+  print(f'feature dims: {len(rows[0][\"tribe_features\"])}')
+  "
+  # n ≥ 50, feature dims = 21, sane min/median/max.
   ```
-- **Manual verification:** play V1, V2, V3 of each clip side-by-side. V2 and V3 must look meaningfully better than V1.
+- **Out of scope:** the predictor itself (PH-J), live ingest endpoint, OpenClaw agent
+
+### PH-J · Fit v0 engagement predictor (ridge)
+- **Owner:** PH-B owner
+- **References:** `@docs/PRD.md#§11.2`, `@.claude/skills/engagement-prediction/SKILL.md`
+- **Files to create:** `cortex/gx10/scripts/fit_predictor.py`, `cortex/gx10/cache/engagement_predictor.pkl`, `cortex/gx10/spikes/predictor_metrics.md`
+- **Action:**
+  1. Read `corpus.jsonl`. Build feature matrix `X = [tribe_features ++ log(followers+1) ++ duration_s ++ n_cold_zones]`, target `y = log(engagement_rate)`.
+  2. 80/20 train/test split (deterministic seed). Fit `sklearn.linear_model.Ridge(alpha=1.0)`.
+  3. Print and save `R²` on held-out + a sample prediction vs. actual table.
+  4. Pickle the fitted model + the feature-column order to `engagement_predictor.pkl`.
+- **Verification:**
+  ```bash
+  python cortex/gx10/scripts/fit_predictor.py
+  cat cortex/gx10/spikes/predictor_metrics.md   # Contains held-out R², sample predictions
+  test -f cortex/gx10/cache/engagement_predictor.pkl
+  ```
+  R² ≥ 0 (yes, even slightly negative on tiny corpora is fine — log it honestly). Pickle exists.
+- **Out of scope:** the `/predict-engagement` endpoint (P2-06); model upgrades — see PRD §11.2 TODO
 
 ---
 
@@ -125,7 +168,7 @@
 - **Owner:** lead engineer
 - **References:** `@docs/PRD.md#§3,§8,§9`, `@cortex/gx10/init.sh` (from PH-B)
 - **Files to create:** `cortex/gx10/brain/main.py`, `models.py`, `config.py`, `cortex/gx10/scripts/01_start_brain.sh`
-- **Action:** FastAPI app with all 7 endpoints returning hardcoded stubs. TRIBE + Gemma loaded at startup.
+- **Action:** FastAPI app with all analysis endpoints returning hardcoded stubs. TRIBE + Gemma loaded at startup.
 - **Verification:**
   ```bash
   bash cortex/gx10/scripts/01_start_brain.sh &
@@ -133,7 +176,7 @@
   curl -s http://localhost:8080/health | jq .
   # Must return: {"status":"ok","tribe_loaded":true,"gemma_loaded":true,...}
   ```
-- **Out of scope:** real inference (use stubs); auto-improve
+- **Out of scope:** real inference (use stubs)
 
 ### P0-B · Next.js shell with three tabs
 - **Owner:** frontend lead
@@ -189,7 +232,7 @@
     | jq .job_id
   # Must return valid UUID. With hero text, response time <500ms (cache hit).
   ```
-- **Out of scope:** audio, video, auto-improve; suggestions (separate task P1-06)
+- **Out of scope:** audio, video; suggestions (separate task P1-06)
 
 ### P1-02 · Backend SSE brain frame streaming
 - **References:** `@docs/PRD.md#§9,§10`
@@ -259,9 +302,9 @@
 
 ---
 
-## Phase 2 — Hours 6–12 — Video Mode + Auto-Improve
+## Phase 2 — Hours 6–14 — Video Mode + Engagement Prediction
 
-> **Goal:** drop video → brain syncs → click `Auto-improve` → V2 loads → click again → V3 loads.
+> **Goal:** drop video → 3-track timeline + cold zones visible → brain syncs to playback → engagement card renders predicted rate + percentile.
 > **Gate:** demo Beats 2+3 run cleanly 2× in a row.
 
 ### P2-01 · Backend `/analyze/video` endpoint
@@ -289,41 +332,89 @@
 - **Files to modify:** `cortex/web/app/components/BrainMonitor.tsx`, `VideoSurface.tsx`
 - **Verification:** play hero video → brain pulses in sync. Scrub to 0:18 → brain shows that second's activation.
 
-### P2-05 · Backend ffmpeg auto-edit service
-- **References:** `@.claude/skills/auto-improve/SKILL.md` (REQUIRED), `@docs/PRD.md#§8.3`
-- **Files to create:** `cortex/gx10/brain/editor.py`, `cortex/gx10/tests/test_editor.py`
+### P2-05 · Backend pooling + predictor service
+- **References:** `@docs/PRD.md#§8.3,§8.4,§11`, `@.claude/skills/engagement-prediction/SKILL.md` (load FIRST), `@.claude/skills/tribe-inference/SKILL.md`
+- **Files to create:** `cortex/gx10/brain/pooling.py`, `cortex/gx10/brain/predictor.py`, `cortex/gx10/brain/corpus.py`, `cortex/gx10/tests/test_pooling.py`
+- **Files to modify:** `cortex/gx10/brain/main.py` (load predictor at lifespan startup; expose `predictor_loaded` + `corpus_size` in `/health`), `cortex/gx10/brain/models.py` (Pydantic DTOs for predict request/response).
+- **Action:**
+  1. `pooling.pool_tribe_output(preds: np.ndarray) -> np.ndarray[~25]` — 3 ROI groups × 6 stats + 3 globals. Pure function. Same code as PH-I uses.
+  2. `EngagementPredictor.load(pkl_path)` → reads ridge model. `predict(features, followers, duration_s) -> {predicted_rate, percentile, ...}`. Class is intentionally swappable behind this interface (see PRD §11.2 TODO).
+  3. `corpus.percentile_rank(rate)` reads `corpus.jsonl` once at startup.
 - **Verification:**
   ```bash
-  cd cortex/gx10 && pytest tests/test_editor.py -v
-  # Test must pass: 30s clip cut from 14-21s produces 23s playable mp4
+  cd cortex/gx10 && CORTEX_STUB_TRIBE=1 CORTEX_STUB_GEMMA=1 pytest tests/test_pooling.py -v
+  curl -s http://<gx10-ip>:8080/health | jq '.predictor_loaded, .corpus_size'
+  # predictor_loaded must be true, corpus_size must equal `wc -l corpus.jsonl`
   ```
+- **Out of scope:** the HTTP endpoint that calls the predictor (P2-06); the upgraded model class (post-baseline)
 
-### P2-06 · Backend `/auto-improve` orchestration
-- **References:** `@.claude/skills/auto-improve/SKILL.md` (REQUIRED), `@docs/PRD.md#§8,§11`
-- **Files to modify:** `cortex/gx10/brain/main.py`, `gemma.py`, `prompts.py`
+### P2-06 · `POST /predict-engagement` endpoint
+- **References:** `@docs/PRD.md#§9 (endpoint), §11.1`
+- **Files to modify:** `cortex/gx10/brain/main.py`
+- **Action:** new endpoint takes `{job_id, followers}`. Looks up the analyzed video's pooled features (cached from the `/stream` run). Calls `predictor.predict(...)` + `corpus.percentile_rank(...)`. Returns the JSON shape from PRD §9. Sub-100ms.
 - **Verification:**
   ```bash
-  JOB=$(curl -s -X POST http://<gx10-ip>:8080/auto-improve -d '{"clip_id":"khan","version":1}' | jq -r .job_id)
-  curl -N http://<gx10-ip>:8080/stream-improve/$JOB
-  # Must show: reasoning → cutting → cut_applied → reanalyzing → brain_frame... → complete
-  # For hero clip, all events stream in <2s (cached)
+  JOB=$(curl -s -X POST http://<gx10-ip>:8080/analyze/video -F file=@cortex/gx10/cache/hero_video/khan.mp4 | jq -r .job_id)
+  # wait for /stream/$JOB to complete...
+  curl -s -X POST http://<gx10-ip>:8080/predict-engagement \
+    -H 'content-type: application/json' \
+    -d "{\"job_id\":\"$JOB\",\"followers\":10000}" | jq .
+  # 200 with predicted_rate ∈ (0,1] and percentile ∈ [0,100]
   ```
 
-### P2-07 · AutoImproveButton with streaming reasoning
-- **References:** `@.claude/skills/auto-improve/SKILL.md`, `@docs/PRD.md#§7.4,§11`
-- **Files to create:** `cortex/web/app/components/AutoImproveButton.tsx`
-- **Files to modify:** `cortex/web/app/components/VideoSurface.tsx`
-- **Verification:** click on hero clip → see streaming reasoning → V2 loaded → click again → V3 loaded. <90s total for both rounds.
+### P2-07 · Frontend EngagementCard + wiring
+- **References:** `@docs/PRD.md#§7.4, §11.1`
+- **Files to create:** `cortex/web/src/app/components/EngagementCard.tsx`
+- **Files to modify:** `cortex/web/src/app/components/VideoSurface.tsx` (mount card after `complete`), `cortex/web/src/app/lib/brainClient.ts` (add `predictEngagement(jobId, followers)`)
+- **Verification:**
+  ```bash
+  cd cortex/web && npm run typecheck
+  # Manual: drop hero video → after stream completes, card renders with a number + percentile
+  # Edit followers field → percentile re-renders client-side without re-running TRIBE
+  ```
+- **Out of scope:** Cloudinary upload polish; the card's mini-sparkline (Phase 3 polish)
 
 ### P2-08 · End-to-end smoke test
-- **Files to create:** `cortex/gx10/tests/test_video_e2e.py`
+- **Files to create:** `cortex/gx10/tests/test_video_e2e.py` (extend existing) + ensure `test_predict_engagement_returns_sane_payload` exists
 - **Verification:**
   ```bash
   cd cortex/gx10 && pytest tests/test_video_e2e.py -v
-  # Scripted: drop hero video → analyze → auto-improve → auto-improve again. All complete without error.
+  # Drop hero video → analyze → predict-engagement → all return 200, predicted_rate is finite, percentile in [0,100].
   ```
 
-> 🛑 **PHASE 2 GATE:** Beats 2+3 work 2× in a row. **`/clear` before Phase 3.**
+### P2-09 · Backend originality library — `library.py` + transcript stack (PRD §11.6)
+- **References:** `@docs/PRD.md#§11.6,§8.5,§8.6`
+- **Files to create:** `cortex/gx10/brain/library.py`, `cortex/gx10/brain/transcribe.py`, `cortex/gx10/brain/text_embed.py`, `cortex/gx10/tests/test_library.py`
+- **Action:**
+  1. `transcribe.py`: lazy-load `whisper.load_model("base")`, `transcribe(audio_path) -> str`.
+  2. `text_embed.py`: lazy-load `SentenceTransformer("nomic-ai/nomic-embed-text-v1.5", trust_remote_code=True)`, `embed_text(s) -> np.ndarray[768]` (L2-normed).
+  3. `library.py`: `LibraryEntry` dataclass; `load_creator_library(creator_id)` reads `cache/library/<creator_id>/*.json`; `save_entry(entry)` writes one file; `rank_similar(brain_vec, text_vec, library, top_k=3)` returns list with weighted cosine + ROI breakdown via `pooling.ROI_GROUPS`.
+- **Verification:**
+  ```bash
+  cd cortex/gx10 && pytest tests/test_library.py -v
+  # rank_similar with mocked brain/text vecs returns top_k matches; cold-start <5 returns empty list.
+  ```
+
+### P2-10 · Backend `POST /library/upload` + `GET /library/{creator_id}` + `POST /similarity`
+- **References:** `@docs/PRD.md#§9,§11.6`
+- **Files to modify:** `cortex/gx10/brain/main.py`, `cortex/gx10/brain/models.py` (already has DTOs)
+- **Action:**
+  1. `/library/upload` (multipart): re-uses video TRIBE pipeline, also calls `transcribe` + `text_embed`, writes `cache/library/<creator_id>/<video_id>.json`, updates in-memory `_LIBRARIES: dict[str, list[LibraryEntry]]`.
+  2. `/library/{creator_id}` returns metadata-only listing.
+  3. `/similarity`: pulls cached `pooled_features` + `text_embedding` from `_JOBS[job_id]` (cache them in `/stream` next to engagement features), calls `library.rank_similar`, returns `SimilarityResponse`. Cold-start gate at `SIMILARITY_MIN_LIBRARY_SIZE`.
+- **Verification:**
+  ```bash
+  cd cortex/gx10 && pytest tests/test_video_e2e.py::test_similarity_cold_start -v
+  cd cortex/gx10 && pytest tests/test_video_e2e.py::test_similarity_after_5_uploads -v
+  ```
+
+### P2-11 · Frontend `LibraryUploader.tsx` + `SimilarityPanel.tsx`
+- **References:** `@docs/PRD.md#§7.5,§7.6`
+- **Files to create:** `cortex/web/src/app/components/LibraryUploader.tsx`, `cortex/web/src/app/components/SimilarityPanel.tsx`
+- **Files to modify:** `cortex/web/src/app/components/VideoSurface.tsx` (mount `SimilarityPanel` below `EngagementCard`), `cortex/web/src/app/lib/brainClient.ts` (add `uploadLibraryEntry`, `getLibrary`, `predictSimilarity`)
+- **Verification:** drop 5+ library mp4s in uploader → POST /similarity for a fresh draft → 3 thumbnail cards render in <100ms after EngagementCard. Click → side drawer with match details. Library size <5 → panel hidden, replaced with "upload N more clips" hint.
+
+> 🛑 **PHASE 2 GATE:** Beats 2+3+3.5 work 2× in a row. **`/clear` before Phase 3.**
 
 ---
 
@@ -371,6 +462,20 @@
 - **Only if P3-01 through P3-05 are ✅ by hour 16**
 - **Files to create:** `cortex/web/app/lib/tts.ts`
 
+### P3-08 · OPTIONAL: upgrade engagement predictor
+- **Only if P2-05/06/07 are ✅ and held-out R² of the v0 ridge feels weak (<0.05)**
+- **Files to modify:** `cortex/gx10/brain/predictor.py`, `cortex/gx10/scripts/fit_predictor.py`
+- **References:** `@docs/PRD.md#§11.2` (TODO list of swappable model classes)
+- **Action:** swap `Ridge` for `GradientBoostingRegressor` (zero new deps) or `XGBRegressor` (heavier-sounding, +1 dep). Re-fit. Re-save pickle. The `/predict-engagement` endpoint should not need changes — the swap is behind the `EngagementPredictor` interface.
+- **Verification:** `python scripts/fit_predictor.py` → new `R²` printed; smoke tests still pass.
+
+### P3-09 · OPTIONAL: scraper-agent demo stub
+- **Only if hours 14–16 free**
+- **References:** `@docs/PRD.md#§11.4`, `@.claude/skills/engagement-prediction/SKILL.md`
+- **Files to create:** `cortex/gx10/scripts/refit_predictor.py`, screenshot/video of the OpenClaw or NemoClaw agent navigating to YouTube Shorts trending and harvesting URLs (does not need to actually run during the demo)
+- **Action:** wire the cron-style entrypoint that runs `ingest_shorts.py` against a fresh URL list, then `fit_predictor.py`. Record a 30s loom of the agent path for the Devpost video.
+- **Verification:** running `python scripts/refit_predictor.py path/to/urls.txt` end-to-end appends new rows + writes a new pickle.
+
 > 🛑 **PHASE 3 GATE — SCOPE FREEZE.** From hour 18: bug fixes only.
 
 ---
@@ -399,12 +504,12 @@
 |---|---|---|
 | TRIBE env still broken at Wed EOD | Abandon Cortex → 3D Movement Coach | All |
 | Niivue shader broken at hour 14 | Rotating PNG video instead of live BrainMonitor | P3-04 → swap |
-| Auto-improve broken at hour 14 | Manual V1/V2 toggle (cached pair, button "Improved cut") | P2-06, P2-07 → simplify |
-| Gemma weak at hour 16 | Hardcoded suggestion library by cold-zone region | P1-06, P2-06 → hardcode |
+| Gemma weak at hour 16 | Hardcoded suggestion library by cold-zone region | P1-06 → hardcode |
+| `corpus.jsonl` < 30 rows by hour 14 | Skip percentile rank; show only predicted rate; mention "trained on N=20 — pipeline scales, seed set is small" | PH-I → ship what we have |
+| Predictor R² ≤ 0 by hour 16 | Drop to 3-bucket classifier (top-quartile / median / bottom-quartile via thresholds on `n_cold_zones` + `language.fraction_below_zero`) | P2-05 → simplify |
 | Tailscale blocked at venue | Phone hotspot for laptop↔GX10 | P0-C |
 | GX10 dies mid-demo | Backup laptop running cortexlab Streamlit dashboard | P5-02 |
-| ffmpeg breaks | Skip auto-improve, fall back to manual V1/V2 toggle | P2-05 → hardcode |
 
 ---
 
-*Task log lives here. When verification passes, mark ✅ and commit. Spawned follow-ups get added inline with parent ref like "(from P2-07)".*
+*Task log lives here. When verification passes, mark ✅ and commit. Spawned follow-ups get added inline with parent ref like "(from P2-04)".*

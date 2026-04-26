@@ -43,3 +43,49 @@ export interface TranscriptWord {
 // Per-track engagement: track name → per-second score in [-1.5, 1.5] roughly.
 // Common keys for video: "visual", "auditory", "language". Audio omits "visual".
 export type EngagementCurves = Record<string, number[]>;
+
+// §11.6 — creator library + originality search.
+export type RoiName = 'visual' | 'auditory' | 'language';
+
+export interface RoiBreakdown {
+  visual: number;
+  auditory: number;
+  language: number;
+}
+
+export interface SimilarityMatch {
+  video_id: string;
+  score: number;
+  thumbnail_url: string | null;
+  uploaded_at: string;
+  duration_s: number;
+  dominant_roi: RoiName;
+  roi_breakdown: RoiBreakdown;
+  text_similarity: number;
+}
+
+export interface SimilarityResponse {
+  matches: SimilarityMatch[];
+  library_size: number;
+  creator_id: string;
+  weighting?: { brain: number; text: number };
+  message?: string;
+}
+
+export interface LibraryEntryMeta {
+  video_id: string;
+  uploaded_at: string;
+  duration_s: number;
+  thumbnail_url: string | null;
+}
+
+export interface LibraryListResponse {
+  creator_id: string;
+  size: number;
+  entries: LibraryEntryMeta[];
+}
+
+export interface LibraryUploadResponse {
+  library_entry_id: string;
+  library_size: number;
+}

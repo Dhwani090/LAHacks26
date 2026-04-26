@@ -1,8 +1,8 @@
 # PRD.md — Cortex
 
-> **The product:** an editing room for any short-form content where a foundation neuroscience model on the GX10 predicts what the average viewer's brain did with your work. Three input modes — text, audio, short-form video — sharing one engine and one brain visualization.
+> **The product:** a pre-flight check for short-form content. Drop in a draft video and Cortex (a) renders what the average viewer's brain did with it via a foundation neuroscience model on the GX10, and (b) predicts the engagement rate it will get on YouTube Shorts / TikTok / Instagram Reels via a model trained on real public videos paired with their TRIBE brain features. Three input modes — text, audio, short-form video — share one engine and one brain visualization.
 >
-> **The pitch in one breath:** *"Every creator ships work without knowing if it landed. Cortex tells you — by predicting how the average brain responded."*
+> **The pitch in one breath:** *"Every creator ships work guessing whether it'll land. Cortex tells you — by simulating the brain response and predicting engagement on a model trained from videos that already went viral."*
 >
 > **Demo day:** LA Hacks 2026, Sunday morning, UCLA Pauley Pavilion. **36-hour build, 4-person team.**
 >
@@ -16,8 +16,8 @@
 The project succeeds if and only if all of these are true on Sunday morning:
 
 1. **Demo runs end-to-end in <3 minutes** with all three modes (text, audio, video) demonstrated
-2. **Auto-improve loop produces a visible v1→v2 improvement** on at least 2 hero video clips, repeatable
-3. **Judge can drop their own content** in any of the three modes and see a brain visualization within 60 seconds (or fall back gracefully to a cached hero clip)
+2. **Judge can drop their own content** in any of the three modes and see a brain visualization within 60 seconds (or fall back gracefully to a cached hero clip)
+3. **Engagement-prediction surface returns a numeric estimate** (predicted engagement rate + percentile vs. the seed corpus) for any uploaded video in <5s after TRIBE finishes
 4. **Devpost submission is complete** with video, GitHub link, and all four sponsor/side-prize tracks tagged: Flicker to Flow, ASUS, Cloudinary, MLH Best Use of Gemma, Best UI/UX
 5. **The brain visualization is visibly polished** — judges from 30 feet away should be drawn to the booth by the rotating glowing brain
 
@@ -27,9 +27,15 @@ If any of these aren't met by hour 30, focus the remaining time on the gap.
 
 ## §1 — Vision
 
-Every writer, editor, marketer, podcaster, founder, and short-form creator ships content guessing whether it landed. They wait for analytics two weeks later. Cortex closes the loop. Drop in a script, an audio take, or a 30-second video — Cortex predicts the average viewer's second-by-second neural engagement using **TRIBE v2**, a foundation model Meta FAIR released in March 2026, and renders it as a glowing cortical surface pulsing alongside the content. A small Gemma model reads the engagement curve and suggests specific edits. For video, an auto-improve loop applies cuts and re-runs the prediction, showing v1→v2→v3 with the brain getting healthier each pass.
+Every writer, editor, marketer, podcaster, founder, and short-form creator ships content guessing whether it landed. They wait two weeks for analytics. Cortex closes the loop *before* upload. Drop in a script, an audio take, or a 30-second video, and three things happen:
 
-Why this only works on this hardware: TRIBE v2 needs ~30GB VRAM with all encoders loaded. The GX10's 128GB unified memory holds TRIBE + Gemma + ffmpeg orchestration concurrently, with sub-second response paths for text and ~25s for video re-inference. A laptop cannot hold the model. A cloud API would round-trip the data — defeating the privacy story creators care about for unreleased content.
+1. **TRIBE v2** (Meta FAIR neuroscience model, released March 2026) predicts the average viewer's second-by-second neural engagement and renders it as a glowing cortical surface pulsing alongside the content.
+2. The brain output is pooled into a feature vector that we feed to an **engagement-prediction model** trained on public YouTube Shorts paired with their real-world view/like/comment counts and the uploader's follower count. The user sees: *"predicted engagement rate: 8.4% (75th percentile of your account's recent videos)."*
+3. For text mode, a small **Gemma 2B** model reads cold zones and proposes sentence rewrites the user can apply.
+
+The model lives on the box: training data, training run, and inference all on the GX10. An offline scraper (described in §11.4 — `yt-dlp` for the demo build, OpenClaw / NemoClaw browser-agent path on the roadmap) pulls trending Shorts in the background and re-fits the model on each fresh batch.
+
+Why this only works on this hardware: TRIBE v2 needs ~30GB VRAM with all encoders loaded. The GX10's 128GB unified memory holds TRIBE + Gemma + the predictor + a small training corpus concurrently, with sub-second response paths for text and ~25s for video inference. A laptop cannot hold TRIBE. A cloud API would round-trip the user's draft content — defeating the privacy story creators care about for unreleased work.
 
 Why this only works now: TRIBE v2 was open-sourced one month ago. Most teams at LA Hacks 2026 will not have heard of it. Originality is asymmetric.
 
@@ -40,13 +46,16 @@ Why this only works now: TRIBE v2 was open-sourced one month ago. Most teams at 
 - iOS or Android app — desktop web only
 - User accounts, login, auth, OAuth, social sign-in
 - Multi-day project history or shareable links
-- Long-form content (>60 seconds video, >60 seconds audio, >500 words text)
-- Auto-regeneration of new content (no B-roll generation, no voice synthesis, no music swap, no script rewriting beyond inline suggestions)
+- Long-form content (>180 seconds video, >180 seconds audio, >500 words text). 180s is the platform-aware ceiling: YouTube Shorts now allows up to 3min, IG Reels max 90s, most TikToks <120s. Past that, the TRIBE pooling assumptions (per-clip ROI averaging) stop matching how creators think about short-form pacing.
+- Auto-editing of video by cutting low-engagement spans (the cuts-on-cold-zones loop is removed — the diagnostic + the engagement number is the product)
+- Auto-regeneration of new content (no B-roll generation, no voice synthesis, no music swap, no script rewriting beyond inline text-mode suggestions)
 - Real-time live camera or microphone input
 - Cloud inference fallback if the GX10 is down — local or nothing
 - Multi-user collaboration, comments, sharing
 - ChromaDB, vector stores, anything beyond filesystem JSON cache
 - Phone-side ZETIC integration — explicitly skipped, do not bolt on
+- Live scraping of Instagram Reels or TikTok during the demo — both platforms aggressively block scrapers and rate-limit, so the build path is **YouTube Shorts via `yt-dlp`** for the seed corpus; IG/TikTok are demoed as "pipeline-ready, runs on the box" but not relied on live
+- Training the engagement model on >1k videos during the hackathon — seed set is 50–200 hand-pulled YT Shorts, retraining on bigger corpora is roadmap (the offline scraper agent is the future, not the demo)
 - Anything discovered after hour 18 (scope freeze gate)
 
 ---
@@ -67,9 +76,13 @@ Two-tier, fully local during the demo, talking over Tailscale.
 - **FastAPI + uvicorn + `sse-starlette`**
 - **`tribev2`** package from `git+https://github.com/facebookresearch/tribev2.git`
 - **`cortexlab-toolkit`** as scaffolding source — fork their `inference/` and `analysis/` modules
-- **`transformers` + Gemma 2B** for edit suggestions
-- **`ffmpeg-python`** for video auto-edit operations
-- In-memory cache + filesystem JSON cache. **NO Chroma, NO SQLite.**
+- **`transformers` + Gemma 2B** for text-mode rewrite suggestions
+- **`scikit-learn`** for the engagement-prediction model (ridge regression baseline; see §11.2 for the upgrade path)
+- **`yt-dlp`** for ingesting YouTube Shorts (and, where it works, IG Reels / TikTok) into the training corpus
+- **`openai-whisper` (base)** for audio→transcript on creator-library uploads (§11.6) — runs on the box, no API call
+- **`sentence-transformers` (`nomic-embed-text-v1.5`)** for transcript embeddings used in originality search (§11.6)
+- **`numpy`** stacked-matrix cosine for similarity ranking — no FAISS, no vector DB. <10k clips fits in <100MB and ranks in <50ms.
+- In-memory cache + filesystem JSON cache + a single `corpus.jsonl` of `{video_id, tribe_features, engagement_rate, followers, ...}` rows + per-creator `cache/library/<creator_id>/*.json` for the originality library. **NO Chroma, NO SQLite.**
 - Pydantic v2 for DTOs
 
 ### Transport
@@ -82,8 +95,12 @@ Two-tier, fully local during the demo, talking over Tailscale.
 - Port 8080: FastAPI server (Cortex brain)
 - TRIBE v2 + LLaMA-3.2-3B + V-JEPA2 + Wav2Vec-BERT loaded at startup (~30GB resident)
 - Gemma 2B loaded at startup (~5GB resident)
-- ffmpeg invoked as subprocess per auto-improve call
-- Total resident: ~35-40GB of 128GB. Plenty of headroom.
+- `engagement_predictor.pkl` (a scikit-learn ridge regressor over pooled TRIBE features) — kilobytes, loaded into RAM
+- `corpus.jsonl` of pre-computed `{tribe_features, engagement_rate, followers}` rows — used both for training and as the percentile-rank reference at inference time (~10MB for 200 videos)
+- Whisper-base (~150MB) + `nomic-embed-text-v1.5` (~550MB) loaded at startup for the originality library (§11.6)
+- Per-creator library `cache/library/<creator_id>/*.json` — TRIBE features + transcript embedding + thumbnail per past clip. Loaded on demand into a `creator_id → list[LibraryEntry]` in-memory dict. ~8KB/clip; 10k clips = 80MB.
+- Optional offline batch ingest: `yt-dlp` pulls a trending-Shorts batch → TRIBE runs over each → corpus appends → predictor refits. This is a separate `scripts/refit_predictor.py` invocation, not a service. The roadmap version replaces the cron with an OpenClaw / NemoClaw browser-agent loop.
+- Total resident: ~36-42GB of 128GB (TRIBE + Gemma + Whisper + nomic + corpus + creator libraries). The remaining ~85GB is room for very large creator libraries — a creator with 5,000 past clips fits with multiple GB to spare.
 
 ---
 
@@ -100,9 +117,10 @@ These eight tasks gate the entire project. If they aren't done by Wednesday, **a
 | PH-E | Pre-render TRIBE outputs for 5 video hero clips. Cache as JSON on GX10. | PH-B owner | 1 | 5 JSON files at `gx10/cache/hero_video/*.json`, each loadable, each contains `brain_frames` of correct shape |
 | PH-F | Pre-render TRIBE outputs for 5 audio clips. Cache as JSON. | Same | 0.5 | 5 JSON files at `gx10/cache/hero_audio/*.json` |
 | PH-G | Pre-render text-mode outputs for 5 example paragraphs. Cache as JSON. | Same | 0.5 | 5 JSON files at `gx10/cache/hero_text/*.json` |
-| PH-H | Pre-render auto-improve V1→V2→V3 sequences for 2 video hero clips. | Same | 2 | For each of 2 clips: 3 MP4s + 3 JSON outputs exist; visual inspection confirms V2 and V3 look better |
+| PH-I | Build a 50-video YT Shorts seed corpus: `yt-dlp` pull → TRIBE over each → write `{video_id, pooled_features, views, likes, comments, followers, duration_s, engagement_rate}` rows to `gx10/cache/corpus.jsonl`. Hand-pick across 5 niches (cooking / explainer / pitch / comedy / fitness) so the predictor isn't single-domain. | PH-B owner | 3-4 | `wc -l gx10/cache/corpus.jsonl` ≥ 50; `python scripts/inspect_corpus.py` prints sane min/median/max engagement rates |
+| PH-J | Fit the v0 engagement predictor on the seed corpus. Ridge regression on pooled features + log(followers) + duration. Serialize to `gx10/cache/engagement_predictor.pkl`. Print held-out R² (expect 0.05–0.25 — this is fine, most engagement is algorithmic noise). | PH-B owner | 1 | `python scripts/fit_predictor.py` writes the .pkl, prints `R² = <num>`, and a sanity prediction on a held-out video matches its actual rate within 0.5 std |
 
-Total pre-hack budget: **~12 hours**. If PH-B fails by **Wed April 23 EOD**, pivot to 3D Movement Coach.
+Total pre-hack budget: **~14-15 hours**. If PH-B fails by **Wed April 23 EOD**, pivot to 3D Movement Coach.
 
 ---
 
@@ -140,20 +158,23 @@ Total pre-hack budget: **~12 hours**. If PH-B fails by **Wed April 23 EOD**, piv
 
 ### 6.2 Audio mode (the surprise)
 
-**Input:** 15-60s audio clip (mp3, wav, m4a).
+**Input:** 15-180s audio clip (mp3, wav, m4a).
 **TRIBE pathway:** audio + language (Wav2Vec-BERT + LLaMA, no V-JEPA).
 **Inference latency:** ~15s.
 **Output:** waveform + 2-track timeline (auditory green, language orange), brain pulses (no visual cortex).
 **Verification:** drop hero audio → 2-track timeline visible within 18s. Brain shows quieter activation than video mode (auditory + language only).
 
-### 6.3 Video mode (the spectacle + auto-improve)
+### 6.3 Video mode (the spectacle + engagement prediction)
 
-**Input:** 15-60s video clip (mp4, mov).
+**Input:** 15-180s video clip (mp4, mov), plus an optional `followers` integer the user types in (defaults to median of corpus).
 **TRIBE pathway:** full trimodal.
-**Inference latency:** ~25-40s.
-**Output:** video player + 3-track timeline (visual blue, auditory green, language orange), brain syncs to playback.
-**Auto-improve:** click button → Gemma reasoning streams → ffmpeg cuts → TRIBE re-runs → V2 loads → repeat for V3.
-**Verification:** drop hero clip → 3-track timeline visible within 45s. Click `Auto-improve` → V2 loads in <30s with visibly different engagement curve. Click again → V3 loads.
+**Inference latency:** ~25-40s for TRIBE; the predictor runs in <50ms once features land.
+**Output:**
+- Video player + 3-track timeline (visual blue, auditory green, language orange), brain syncs to playback. Cold zones highlighted in red on the timeline.
+- Engagement card: predicted rate (e.g. *"8.4% expected"* — views/followers, log-space prediction exponentiated for display) + percentile vs. the seed corpus + a one-line interpretation (*"top 25% — this is hot for your audience size"*).
+- Originality panel (§11.6): top 3 most-similar past clips from the creator's library, each with a similarity score + per-ROI breakdown chip (*"auditory cortex match: 95%"*). Hidden if library < 5 clips.
+
+**Verification:** drop hero clip → 3-track timeline visible within 45s. Play video → brain pulses in sync. Click red cold zone → player jumps to that timestamp. Engagement card renders within 1s after TRIBE complete. Originality panel renders within 100ms after engagement card lands (in-memory cosine).
 
 ---
 
@@ -168,11 +189,13 @@ app/
 │   ├── ModeTabs.tsx        # Text/Audio/Video toggle
 │   ├── TextSurface.tsx     # Paste + heatmap + suggestions
 │   ├── AudioSurface.tsx    # Audio uploader + waveform + 2-track timeline
-│   ├── VideoSurface.tsx    # Video uploader + player + 3-track timeline + auto-improve
+│   ├── VideoSurface.tsx    # Video uploader + player + 3-track timeline + EngagementCard
 │   ├── EngagementTimeline.tsx  # Reusable N-track timeline
+│   ├── EngagementCard.tsx  # Predicted-engagement number + percentile + interpretation
+│   ├── SimilarityPanel.tsx # §11.6 — top-3 past clips with ROI breakdown chips
+│   ├── LibraryUploader.tsx # Bulk uploader for creator's past clips → /library/upload
 │   ├── HeatmapText.tsx     # Per-word color overlay
-│   ├── SuggestionPanel.tsx # Gemma suggestions, click-to-apply
-│   ├── AutoImproveButton.tsx  # Streaming reasoning text
+│   ├── SuggestionPanel.tsx # Text-mode Gemma rewrite suggestions, click-to-apply
 │   ├── StatusChip.tsx      # GX10 connection status
 │   └── DebugOverlay.tsx    # Hideable debug info
 ├── lib/
@@ -201,13 +224,24 @@ app/
 - 3 tracks (video) or 2 tracks (audio) render below media element
 - Cold zones visibly highlighted in red
 - Vertical scrubber syncs to media playback
-- Click on cold zone opens SuggestionPanel for that timestamp
+- Click on cold zone seeks the player to that timestamp
 
-### 7.4 AutoImproveButton verification
-- On click, timeline area switches to "reasoning mode" with streaming text
-- Brain dims to ~30% opacity with thinking animation
-- On `complete` event, player swaps to V2 cleanly
-- See `@.claude/skills/auto-improve/SKILL.md` for orchestration patterns
+### 7.4 EngagementCard verification
+- Renders within 1s of TRIBE `complete` event in video mode
+- Shows predicted engagement rate (one decimal, %), percentile band ("top 25%" / "median" / "below average"), and a one-line plain-English interpretation
+- Shows a "trained on N videos · last updated X" caption (transparent about corpus size)
+- Followers field defaults to corpus-median; user can edit and the card re-renders client-side without re-running TRIBE
+
+### 7.5 SimilarityPanel verification
+- Hidden when library has <5 entries (cold-start gate)
+- After EngagementCard lands, renders top 3 thumbnails with overall score + ROI breakdown chip in <100ms
+- Click on a card opens a side drawer with the matched clip's metadata (uploaded date, duration, transcript snippet)
+- Sanity check: same clip uploaded as both library + draft → top match is itself with score ~1.0
+
+### 7.6 LibraryUploader verification
+- Drag-drop multiple mp4s → POST `/library/upload` for each → progress bar per file
+- Each upload triggers TRIBE + Whisper + transcript-embed pipeline; status reported via SSE
+- After all uploads complete, library size badge updates and SimilarityPanel becomes available on next analysis
 
 ---
 
@@ -220,8 +254,13 @@ gx10/
 │   ├── config.py            # All tuning constants
 │   ├── models.py            # Pydantic DTOs
 │   ├── tribe.py             # TRIBE inference wrapper
-│   ├── gemma.py             # Gemma 2B suggestion service
-│   ├── editor.py            # ffmpeg wrapper for auto-improve cuts
+│   ├── gemma.py             # Gemma 2B text-rewrite service
+│   ├── predictor.py         # Engagement-prediction model (ridge regression on pooled TRIBE features)
+│   ├── pooling.py           # TRIBE (T,20484) → ~25-dim feature vector via ROI grouping + stats
+│   ├── corpus.py            # Reads/writes cache/corpus.jsonl; computes percentile ranks
+│   ├── library.py           # §11.6 — per-creator library load/save + cosine ranking
+│   ├── transcribe.py        # §11.6 — Whisper-base wrapper for audio→transcript
+│   ├── text_embed.py        # §11.6 — nomic-embed-text wrapper, 768-dim L2-normed
 │   ├── cache.py             # Filesystem JSON cache + fallback
 │   ├── streaming.py         # SSE helpers
 │   └── prompts.py           # All Gemma prompts
@@ -229,7 +268,10 @@ gx10/
 │   ├── 00_tailscale_up.sh
 │   ├── 01_start_brain.sh
 │   ├── 99_healthcheck.sh
-│   └── prerender_heroes.py  # Pre-hack PH-E/F/G/H
+│   ├── prerender_heroes.py  # Pre-hack PH-E/F/G
+│   ├── ingest_shorts.py     # yt-dlp pull → TRIBE → corpus.jsonl append (PH-I)
+│   ├── fit_predictor.py     # Read corpus.jsonl → fit ridge → write engagement_predictor.pkl (PH-J)
+│   └── refit_predictor.py   # Cron entrypoint: ingest a fresh batch → re-fit. Roadmap: replace cron with OpenClaw agent.
 ├── cache/
 ├── tests/
 │   └── test_smoke.py
@@ -243,16 +285,31 @@ gx10/
 - See `@.claude/skills/tribe-inference/SKILL.md` for `TribeModel` patterns
 
 ### 8.2 `gemma.py` verification
-- `suggest_edits(mode="text", cold_zones, transcript)` returns ≥1 valid `EditSuggestion` in <3s
-- For text mode: returns rewrite of cold sentence
-- For audio/video: returns cut operation with valid timestamps
+- `suggest_edits(mode="text", cold_zones, transcript)` returns ≥1 valid `EditSuggestion` (rewrite of the cold sentence) in <3s
 
-### 8.3 `editor.py` verification
-- Unit test: cut a 30s clip from 14-21s → produce valid 23s mp4 that plays cleanly
-- Pure function — no global state
-- Sanitizes timestamps (clamps to valid range, rejects overlap)
+### 8.3 `pooling.py` verification
+- `pool_tribe_output(preds: np.ndarray[T, 20484]) -> np.ndarray[~25]` returns a fixed-shape feature vector regardless of input duration
+- For each ROI group (visual / auditory / language) computes: `mean, max, min, std, slope, fraction_below_zero` over the time-averaged ROI curve
+- Plus global: `n_cold_zones, total_cold_duration, peak_global_activation`
+- Pure function, deterministic given input
 
-### 8.4 `cache.py` verification
+### 8.4 `predictor.py` verification
+- `EngagementPredictor.load()` reads `cache/engagement_predictor.pkl` at server startup; `/health` reports `predictor_loaded: true`
+- `predict(features, followers, duration_s) -> {predicted_rate: float, percentile: int}` returns in <50ms
+- Percentile computed against `corpus.jsonl` rates; falls back to "median" if corpus is empty
+- Model class is intentionally swappable — see §11.2 for upgrade path
+
+### 8.5 `library.py` verification
+- `load_creator_library(creator_id)` returns a list of `LibraryEntry` (TRIBE-pooled vec + text embedding + meta) from `cache/library/<creator_id>/*.json`
+- `rank_similar(draft_brain_vec, draft_text_vec, library, top_k=3)` returns top-K with weighted cosine `α·brain + (1-α)·text` and a per-ROI breakdown
+- Stacked-matrix numpy cosine over 10k entries returns in <50ms
+- Returns empty `matches` + cold-start message when library size <5
+
+### 8.6 `transcribe.py` + `text_embed.py` verification
+- `transcribe(audio_path) -> str` runs Whisper-base on CPU/MPS, returns within ~1.5x realtime
+- `embed_text(s) -> np.ndarray[768]` runs `nomic-embed-text-v1.5`, returns L2-normalized vector
+
+### 8.7 `cache.py` verification
 - Hero clips load at startup (`/health` reports `cache_size > 0`)
 - Live request matching cached hash returns in <500ms
 - Cache miss falls through to live inference
@@ -285,27 +342,71 @@ Events streamed in order:
 
 **Verification:** `curl -N .../stream/<id>` shows events in order
 
-### POST `/auto-improve`
-**Request:** `{clip_id: string, version: int}`
-**Response:** `{job_id: string}`
-
-### GET `/stream-improve/{job_id}` (SSE)
-1. `event: reasoning` — Gemma's chain-of-thought streamed token-by-token
-2. `event: cutting` — `{cut: {start, end}}`
-3. `event: cut_applied` — `{v2_url: string}`
-4. `event: reanalyzing` — `{}`
-5. `event: brain_frame` events for v2
-6. `event: complete` — `{v2_engagement, v2_cold_zones, v2_suggestions}`
-
-**Verification:** end-to-end auto-improve on hero clip completes in <60s with all 6 event types observed
-
 ### GET `/health`
-**Response:** `{status, tribe_loaded, gemma_loaded, cache_size, gx10_uptime_s}`
-**Verification:** returns 200 with `tribe_loaded: true` and `gemma_loaded: true`
+**Response:** `{status, tribe_loaded, gemma_loaded, predictor_loaded, corpus_size, cache_size, gx10_uptime_s}`
+**Verification:** returns 200 with `tribe_loaded: true`, `gemma_loaded: true`, and `predictor_loaded: true`
 
 ### POST `/apply-suggestion`
 **Request:** `{clip_id, suggestion_id, action: "apply"|"reject"}`
-**Response:** for text — new text + new analysis job_id. For audio/video — same as auto-improve scoped to one suggestion.
+**Response:** text mode — new text + new analysis `job_id` (the rewritten paragraph re-runs through `/analyze/text`).
+
+### POST `/predict-engagement`
+**Request:** `{job_id: string, followers: int}` — `job_id` from a completed `/analyze/video`. `followers` defaults to corpus median if omitted/zero.
+**Response:**
+```
+{
+  "predicted_rate": 0.084,         // views / followers, log-space prediction exponentiated
+  "predicted_rate_low": 0.061,     // 25th-percentile bootstrap CI lower bound
+  "predicted_rate_high": 0.115,    //                                upper bound
+  "percentile": 78,                // ranked vs. corpus engagement-rate distribution
+  "interpretation": "top 25% — this is hot for your audience size",
+  "corpus_size": 50,
+  "predictor_version": "v0-ridge-2026-04-25"
+}
+```
+**Verification:**
+```bash
+JOB=$(curl -s -X POST .../analyze/video -F file=@hero.mp4 | jq -r .job_id)
+# wait for stream complete...
+curl -s -X POST .../predict-engagement -H 'content-type: application/json' \
+  -d "{\"job_id\":\"$JOB\",\"followers\":10000}" | jq .
+# Returns 200 with predicted_rate ∈ (0, 1] and percentile ∈ [0, 100] within <100ms.
+```
+
+### POST `/library/upload`
+**Request:** multipart with video file + `creator_id` form field.
+**Response:** `{library_entry_id, library_size}` after TRIBE + Whisper + transcript-embed pipeline finishes (~30-60s; client should drive a progress UI from /stream/{job_id}).
+**Side effect:** persists `cache/library/<creator_id>/<video_id>.json`; in-memory creator library updated.
+
+### GET `/library/{creator_id}`
+**Response:** `{creator_id, size, entries: [{video_id, uploaded_at, duration_s, thumbnail_url}]}` — metadata only, no embeddings.
+**Verification:** after 5 uploads, `size == 5` and entries list has matching video_ids.
+
+### POST `/similarity`
+**Request:** `{job_id: string, creator_id: string}` — `job_id` from completed `/analyze/video`.
+**Response:**
+```
+{
+  "matches": [
+    {"video_id": "...", "score": 0.91, "thumbnail_url": "...",
+     "uploaded_at": "2026-03-12T18:42:00Z", "dominant_roi": "auditory",
+     "roi_breakdown": {"visual": 0.62, "auditory": 0.95, "language": 0.78},
+     "text_similarity": 0.81, "duration_s": 38}
+  ],
+  "library_size": 47,
+  "creator_id": "...",
+  "weighting": {"brain": 0.6, "text": 0.4}
+}
+```
+- If `library_size < 5`: returns `{"matches": [], "library_size": N, "message": "upload at least 5 past clips"}`.
+- Returns in <100ms.
+
+**Verification:**
+```bash
+curl -s -X POST .../similarity -H 'content-type: application/json' \
+  -d "{\"job_id\":\"$JOB\",\"creator_id\":\"hero\"}" | jq .
+# After ≥5 library uploads → 3 matches with non-uniform roi_breakdown values.
+```
 
 ---
 
@@ -328,24 +429,125 @@ Idle: slow auto-rotate (0.1 rad/s), gentle breathing pulse on baseline activatio
 
 ---
 
-## §11 — Auto-improve loop
+## §11 — Engagement prediction loop
 
-The money beat. Detailed orchestration spec lives in `@.claude/skills/auto-improve/SKILL.md`. Key flow:
+This is the loop that turns Cortex from "pretty brain visualizer" into "tool a creator would actually open before they post."
 
-1. User clicks `Auto-improve` on analyzed video
-2. Frontend POSTs `/auto-improve`, opens SSE
-3. Gemma reads cold zones + transcript → outputs reasoning + structured cut JSON
-4. Backend streams Gemma's reasoning as it generates (fills 25s of dead air with visible AI work)
-5. ffmpeg applies cut → produces v2.mp4
-6. Backend re-runs TRIBE on v2 → streams new brain frames
-7. Frontend swaps player to v2 → re-renders timeline → re-pulses brain
+### 11.1 Inference path (live, on each `/analyze/video`)
 
-**Failure modes** (in skill):
-- Gemma returns invalid JSON → retry once, then fall back to heuristic cut
-- ffmpeg fails → return v1 unchanged with error event
-- TRIBE re-inference fails → use cached v2 for hero clips
+1. User uploads draft → `/analyze/video` → TRIBE produces `(n_timesteps, 20484)` z-scored BOLD predictions.
+2. `pooling.py` reduces TRIBE output to a fixed ~25-dim feature vector by grouping vertices into 3 ROI curves (visual / auditory / language) and computing per-curve statistics — see §8.3.
+3. Frontend, after `complete`, POSTs `/predict-engagement` with the user-provided follower count.
+4. `predictor.py` runs `model.predict(features ++ [log(followers), duration_s])` — milliseconds.
+5. Backend computes percentile rank by comparing predicted rate against `corpus.jsonl` rates.
+6. Frontend renders `EngagementCard` with the number, percentile, and interpretation.
 
-**Verification:** end-to-end loop on hero clip in <60s. Verbose mode shows all 6 event types.
+### 11.2 The predictor model — baseline + upgrade path
+
+**v0 (hackathon build, ridge regression):**
+- `sklearn.linear_model.Ridge(alpha=1.0)`
+- Input: `~25 pooled TRIBE features ++ [log(followers + 1), duration_s, n_cold_zones]` → ~28 dims total
+- Target: `log(engagement_rate)` where `engagement_rate = views / max(followers, 1)`
+- Trains in milliseconds on 50–500 samples
+- Held-out R² expected 0.05–0.25 (most short-form engagement is algorithmic noise — this is acceptable)
+
+> **TODO (user decision):** the model class is intentionally swappable behind the `EngagementPredictor` interface in `predictor.py`. If a "tougher" regression model sounds better in the pitch, candidates ranked by hackathon-friendliness:
+> - **`sklearn.ensemble.GradientBoostingRegressor`** (no extra dep) — usually +5-10% R² over ridge, "gradient-boosted regression" sounds heavier than "linear regression"
+> - **`xgboost.XGBRegressor`** — adds a dep but it's the recognized name in the field, fits in seconds, "XGBoost" lands well with judges
+> - **Small MLP via `sklearn.neural_network.MLPRegressor`** (or 3-layer torch model) — pitches as "small neural net," may not actually help with N≤200 samples but doesn't hurt accuracy meaningfully
+> - **Don't:** transformer over raw frames, fine-tune TRIBE itself, anything that needs a GPU at predict time
+>
+> Whichever the user picks, the swap is one constructor call in `predictor.py`. Pick after the v0 ridge baseline is wired and demonstrably working — don't tune the model before the pipeline is end-to-end.
+
+### 11.3 Training corpus (`corpus.jsonl`)
+
+One JSON object per line:
+```json
+{"video_id": "yt:abc123", "source": "youtube_shorts", "duration_s": 28.0,
+ "followers": 12500, "views": 84000, "likes": 7200, "comments": 410,
+ "engagement_rate": 6.72, "tribe_features": [...25 floats...],
+ "ingested_at": "2026-04-25T08:30:00Z", "predictor_version": null}
+```
+
+- Pre-hack PH-I seeds 50 videos across 5 niches.
+- Each batch ingest appends rows; `fit_predictor.py` reads the full file and re-trains.
+- The corpus is also the percentile-rank reference at inference time (no separate stats blob).
+
+### 11.4 Offline ingest (`scripts/ingest_shorts.py`)
+
+```
+yt-dlp --skip-download -j "<url>"   # metadata
+yt-dlp -f mp4 -o "<id>.mp4" "<url>" # video
+↓
+TRIBE.predict(video_path) → (T, 20484)
+↓
+pooling.pool_tribe_output(...) → 25-dim vector
+↓
+append row to corpus.jsonl
+```
+
+Demo path = `yt-dlp` + manual URL list. **Roadmap path = an OpenClaw or NemoClaw browser-agent that runs on the GX10 alongside TRIBE, navigates to a trending Shorts page, harvests N URLs autonomously, runs the same pipeline, then triggers `refit_predictor.py`.** The agent is the future-tense story for judges — it does not need to actually run during the demo.
+
+### 11.5 Text-mode rewrite suggestions
+
+(Carried over from the original §11; this is independent of engagement prediction and stays scoped to text mode.)
+
+1. Text analysis returns `cold_zones` (sentences where engagement dropped).
+2. User clicks a cold sentence → `SuggestionPanel` opens.
+3. Gemma rewrites the sentence, preserving the factual claim.
+4. User clicks **Apply** → frontend POSTs `/apply-suggestion`, substitutes the rewrite locally, and re-runs `/analyze/text` on the new paragraph.
+5. Brain re-pulses; the previously-cold sentence now warms.
+
+**Failure modes:**
+- Gemma returns empty / unusable rewrite → frontend keeps the original, surfaces a soft message.
+- `/apply-suggestion` returns 5xx → frontend logs and shows the local rewrite anyway.
+
+**Verification:** apply a suggestion on a hero paragraph → re-render in <12s with visible warming on the formerly-cold sentence.
+
+### 11.6 Creator library + originality search
+
+The 128 GB unified memory turns into a feature here: a creator's entire short-form back-catalog can live in RAM as TRIBE features + transcript embeddings, and we can tell them, in <100ms, *"the brain pattern of this draft is 91% similar to your post from March 12 — you've made this video before."*
+
+This is the second pillar of the pitch. Engagement prediction asks *"will this work?"*; originality search asks *"are you repeating yourself?"* Both are creator-facing, both are GX10-native, both share the same TRIBE pipeline.
+
+**Library lifecycle:**
+1. Creator uploads N (≥5, gated) past Shorts/Reels/TikToks via the same uploader.
+2. For each: Phase 1 caches the mp4 + meta locally (no download from external platforms — files come from the creator's drive). Phase 2 runs TRIBE + transcribes the audio with Whisper-base + embeds the transcript with `nomic-embed-text-v1.5`.
+3. Each library entry persists as `cache/library/<creator_id>/<video_id>.json`:
+   ```json
+   {"video_id": "...", "uploaded_at": "...", "duration_s": 42,
+    "tribe_pooled": [...21 floats...],
+    "tribe_per_roi_curve": [...optional finer signal...],
+    "transcript": "...", "text_embedding": [...768 floats...],
+    "thumbnail_url": "..."}
+   ```
+4. Library entries are loaded into a per-creator in-memory dict at startup (or on first request after upload) — no vector DB. Brute-force cosine over <10k vectors is <50ms in numpy.
+
+**Live similarity flow (`POST /similarity`):**
+1. Frontend, after a draft `complete` SSE on `/analyze/video`, POSTs `{job_id, creator_id}`.
+2. Backend pulls cached `tribe_pooled` + transcript embedding for the draft job.
+3. For each library entry: `score = α · cos(brain_draft, brain_lib) + (1-α) · cos(text_draft, text_lib)` where α defaults to `SIMILARITY_BRAIN_WEIGHT = 0.6`.
+4. Rank, return top 3 with per-ROI similarity breakdown so the UI can say *"your auditory cortex pattern matches this clip — you tend to reach for the same audio hooks."*
+5. Response shape:
+   ```json
+   {"matches": [
+     {"video_id": "...", "score": 0.91, "thumbnail_url": "...",
+      "uploaded_at": "...", "dominant_roi": "auditory",
+      "roi_breakdown": {"visual": 0.62, "auditory": 0.95, "language": 0.78},
+      "text_similarity": 0.81}
+   ], "library_size": 47, "creator_id": "..."}
+   ```
+
+**Cold-start gate:** library < `SIMILARITY_MIN_LIBRARY_SIZE` (5) → endpoint returns `{matches: [], library_size: N, message: "upload at least 5 past clips"}`. Frontend hides the panel.
+
+**Frontend (`SimilarityPanel.tsx`):** below the EngagementCard, three thumbnail cards with similarity score + ROI breakdown chip. Click → opens the matched clip in a side drawer. Sub-100ms render after the prediction lands.
+
+**Memory budget:** 21 floats (84B) + 768-dim text embedding (3KB) + transcript (~5KB) + thumbnail URL ≈ 8KB per clip. 10k-clip library = 80MB. The 128GB box laughs.
+
+**Verification:**
+- Upload 5+ hero library clips → POST /similarity for a fresh draft → returns 3 matches with non-trivial ROI breakdown variance (not all 1.0, not all 0.0).
+- Library size 0–4 → endpoint returns the cold-start message; frontend hides panel.
+- Same draft uploaded twice → top match is itself with score ~1.0 (sanity check).
 
 ---
 
@@ -369,10 +571,14 @@ The money beat. Detailed orchestration spec lives in `@.claude/skills/auto-impro
 | R2 | Niivue mesh rendering buggy / shader issues | Medium | High | Prototype in PH-D; have fallback PNG-rotation video if shader fails |
 | R3 | Tailscale blocked at Pauley venue Wi-Fi | Medium | High | Phone hotspot fallback for laptop↔GX10 |
 | R4 | Gemma suggestion quality mid for short content | Medium | Medium | Hand-curate 5-10 prompt examples; hardcoded fallback per cold-zone type |
-| R5 | Auto-improve re-inference latency too long for demo | Medium | High | Pre-cache v1→v2→v3 for hero clips (PH-H); narrate the wait with streaming reasoning text |
 | R6 | TRIBE output noisy on judge-uploaded clips | Medium | Medium | Tooltip on upload: "best with naturalistic video and conversational text"; pivot to hero clips |
 | R7 | GX10 dies mid-demo | Low | Catastrophic | Backup laptop with cortexlab Streamlit dashboard as full fallback |
-| R8 | ffmpeg cut produces broken video | Low | Medium | Test with 10 sample clips during PH-H; sanitize timestamps |
+| R9 | Engagement model R² is near zero — predictions don't track reality | Medium | Medium | Frame the demo around *"the brain features are predictive of variance, here's the honest R²"* — judges respect transparency. Fallback: hardcode "predicted top-quartile / median / bottom-quartile" buckets if the regressor goes haywire. |
+| R10 | yt-dlp blocked or rate-limited mid-ingest | Medium | Low | PH-I runs pre-hack; the corpus is on disk before the demo. If we want to *demo* live ingest, have a 3-video URL list pre-tested. |
+| R11 | Engagement metric in corpus is mostly "the algorithm pushed it" not "viewers liked it" | Inherent | Low | Frame as *"predicting algorithmic engagement"* — that's literally what creators want to optimize. Do not claim we predict *quality*. |
+| R12 | Whisper / nomic-embed model load adds startup latency (~30s extra) | Medium | Low | Lazy-load on first `/library/upload` instead of at server boot. Upload UX already has a progress bar so the cold-load tax hides inside it. |
+| R13 | Creator library top match is always trivially-similar (same speaker → identical voice features dominate) | Medium | Medium | Brain weight α=0.6 (not 1.0) keeps text similarity from dominating; if matches still feel uniform, expose the α slider in DebugOverlay so we can re-tune live. |
+| R14 | TRIBE 21-dim pooled vector is too coarse for similarity (everything looks similar) | Medium | Medium | Fall back to the per-ROI time-curve embeddings (`tribe_per_roi_curve` in `LibraryEntry`) — concatenated visual+auditory+language curves are 180-540 dims and discriminative enough to break ties. |
 
 ---
 
@@ -388,19 +594,28 @@ Already on Text tab. Pre-loaded paragraph. Click `Diagnose`.
 Click cold sentence → Gemma suggestion → Apply → re-render in 5s → warm.
 > *"Five-second iteration. Edit, see the brain, edit again."*
 
-**Beat 2 — switch to video (20s).**
+**Beat 2 — switch to video (25s, the spectacle).**
 Hit Video tab. Pre-rendered 30s hero clip. Hit play. Brain syncs. Around 0:18, language region visibly dims.
 > *"Right there. Eighteen seconds. They lost the average viewer."*
-Pause.
 
-**Beat 3 — auto-improve (40s, the money beat).**
-Click `Auto-improve`. Streaming text in timeline area:
-*"identified language drop at 0:14... transcript suggests pacing issue... testing 7-second cut... regenerating brain response..."*
+Tap the red cold-zone band → player jumps to 0:18 → re-watch with the brain showing exactly which region dropped.
 
-~25s of visible AI work. v2 loads. Brain re-pulses. Cold zone gone.
+**Beat 3 — engagement prediction (35s, the money beat).**
+Engagement card animates in next to the brain.
+> *"And here's the part our hardware lets us do that no laptop can. We trained a model on real public Shorts — 50 of them so far, the offline scraper agent on the box adds more every night. We took TRIBE's brain prediction, pooled it into a feature vector, paired each one with the actual view count and the uploader's follower count, and learned what brain patterns correlate with engagement."*
 
-Click `Auto-improve again`. v3 loads ~25s later. Even healthier.
-> *"Three cuts. Ninety seconds. The video improved itself, watching the brain at every step."*
+Point at the card.
+> *"This clip's predicted engagement rate is 8.4% — that's the 78th percentile of our corpus for an account this size. If you're sitting on this draft right now, you ship it."*
+
+Type a different follower count into the box. Card re-renders instantly.
+> *"Change the audience size, the percentile updates client-side. The brain features don't change — only the comparison set does."*
+
+**Beat 3.5 — originality search (20s, the hardware flex).**
+Below the engagement card, three thumbnails of the creator's past clips appear with similarity scores.
+> *"And because the box has 128 gigs, we can keep their entire back-catalog in memory as TRIBE features. So when they upload this draft, we can also tell them — instantly — which of their past videos has the most similar brain pattern. They've already made this video. Or they haven't, and they're original. Either way, they know before they hit post."*
+
+Tap the top match → side drawer slides in showing it's a 91% brain match, especially in the auditory cortex.
+> *"Same hooks. Same audio rhythm. The brain doesn't lie — they're recycling."*
 
 **Beat 4 — switch to audio (15s).**
 Hit Audio tab. Pre-rendered podcast clip. Brain pulses but only auditory + language regions.
@@ -411,13 +626,13 @@ Hit Audio tab. Pre-rendered podcast clip. Brain pulses but only auditory + langu
 
 Most judges paste text first. They watch one of their own sentences underline blue. They react.
 
-**Beat 6 — close (15s).**
+**Beat 6 — close (20s).**
 Step back, gesture at GX10.
-> *"Same engine, three surfaces, all on the box behind me. Model came out a month ago — most teams couldn't load it, it needs 30 gigs of GPU memory. We have 128. Whatever you ship, this is the first tool that tells you if it landed before your audience does."*
+> *"Same engine, three surfaces, all on the box behind me. TRIBE came out a month ago — most teams couldn't load it, it needs 30 gigs of GPU memory. We have 128. The brain prediction, the engagement model, the corpus, and the scraper agent that re-trains it nightly all live here. Your draft never leaves the box. Whatever you ship, this is the first tool that tells you if it'll land before your audience does."*
 
 Slide tablet back. Walk three steps away.
 
-**Total runtime:** ~2.5 minutes.
+**Total runtime:** ~3 minutes.
 
 ---
 
@@ -427,8 +642,9 @@ Slide tablet back. Walk three steps away.
 |---|---|
 | TRIBE env still broken at Wed EOD pre-hack | **Abandon Cortex.** Pivot to 3D Movement Coach. |
 | Niivue shader broken at hour 14 | Replace BrainMonitor with rotating PNG video of pre-rendered brain animation |
-| Auto-improve loop not working at hour 14 | Drop to manual V1/V2 toggle (pre-cached pair, button labeled `Improved cut`) |
 | Gemma suggestions weak at hour 16 | Hand-written suggestion library indexed by cold-zone region |
+| Engagement predictor R² ≤ 0 at hour 16 | Drop to 3-bucket classifier ("top-quartile / median / bottom-quartile") via simple thresholds on `n_cold_zones` and `language.fraction_below_zero`. Card still renders a number — just rounded into a bucket. Honest framing in pitch. |
+| `corpus.jsonl` < 30 rows by hour 14 | Skip percentile rank, show only the predicted rate; mention "trained on N=20 — pipeline scales, the seed set is small for the demo." |
 | Tailscale blocked at venue | Phone hotspot dedicated to laptop↔GX10 |
 | GX10 unavailable | Backup laptop running cortexlab Streamlit dashboard |
 

@@ -27,7 +27,12 @@ export const TUNING = {
   // Text mode
   MAX_TEXT_WORDS: 500,
 
-  // Audio / video
-  MAX_MEDIA_SECONDS: 60,
+  // Audio / video — covers YT Shorts max (3min), IG Reels (90s), most TikToks.
+  // Mirrors gx10/brain/config.py:MAX_CLIP_DURATION_S.
+  MAX_MEDIA_SECONDS: 180,
   MIN_MEDIA_SECONDS: 15,
+
+  // Originality / creator-library (PRD §11.6)
+  SIMILARITY_MIN_LIBRARY_SIZE: 5,
+  SIMILARITY_TOP_K: 3,
 } as const;

@@ -39,7 +39,6 @@ class EditSuggestion(BaseModel):
     cold_zone: ColdZone
     rationale: str
     rewrite: str | None = None
-    cut: dict | None = None  # {"start_t": float, "end_t": float}
 
 
 class BrainFrame(BaseModel):
@@ -51,13 +50,26 @@ class HealthResponse(BaseModel):
     status: Literal["ok", "degraded", "loading"]
     tribe_loaded: bool
     gemma_loaded: bool
+    predictor_loaded: bool
+    corpus_size: int
     cache_size: int
     gx10_uptime_s: float
 
 
-class AutoImproveRequest(BaseModel):
-    clip_id: str
-    version: int
+class PredictEngagementRequest(BaseModel):
+    job_id: str
+    followers: int = Field(default=0, ge=0)
+
+
+class PredictEngagementResponse(BaseModel):
+    predicted_rate: float
+    percentile: int
+    interpretation: str
+    corpus_size: int
+    predictor_version: str
+    followers_used: int
+    duration_s: float
+    n_cold_zones: int
 
 
 class ApplySuggestionRequest(BaseModel):
@@ -69,3 +81,52 @@ class ApplySuggestionRequest(BaseModel):
 class ApplySuggestionResponse(BaseModel):
     new_text: str | None = None
     job_id: str | None = None
+
+
+# §11.6 — creator library + originality search.
+class SimilarityRequest(BaseModel):
+    job_id: str
+    creator_id: str = Field(..., min_length=1, max_length=64)
+
+
+class RoiBreakdown(BaseModel):
+    visual: float
+    auditory: float
+    language: float
+
+
+class SimilarityMatch(BaseModel):
+    video_id: str
+    score: float
+    thumbnail_url: str | None = None
+    uploaded_at: str
+    duration_s: float
+    dominant_roi: Literal["visual", "auditory", "language"]
+    roi_breakdown: RoiBreakdown
+    text_similarity: float
+
+
+class SimilarityResponse(BaseModel):
+    matches: list[SimilarityMatch]
+    library_size: int
+    creator_id: str
+    weighting: dict[str, float] | None = None
+    message: str | None = None
+
+
+class LibraryEntryMeta(BaseModel):
+    video_id: str
+    uploaded_at: str
+    duration_s: float
+    thumbnail_url: str | None = None
+
+
+class LibraryListResponse(BaseModel):
+    creator_id: str
+    size: int
+    entries: list[LibraryEntryMeta]
+
+
+class LibraryUploadResponse(BaseModel):
+    library_entry_id: str
+    library_size: int

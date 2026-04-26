@@ -8,6 +8,9 @@ import type {
   BrainFrame,
   ColdZone,
   EditSuggestion,
+  LibraryListResponse,
+  LibraryUploadResponse,
+  SimilarityResponse,
   TranscriptWord,
 } from './types';
 
@@ -78,10 +81,6 @@ export const brainClient = {
     return postForm<JobAccepted>('/analyze/video', fd, signal);
   },
 
-  autoImprove(clipId: string, version: number, signal?: AbortSignal): Promise<JobAccepted> {
-    return postJson<JobAccepted>('/auto-improve', { clip_id: clipId, version }, signal);
-  },
-
   applySuggestion(
     clipId: string,
     suggestionId: string,
@@ -91,12 +90,39 @@ export const brainClient = {
     return postJson('/apply-suggestion', { clip_id: clipId, suggestion_id: suggestionId, action }, signal);
   },
 
-  streamUrl(jobId: string): string {
-    return url(`/stream/${jobId}`);
+  // §11.6 — creator library + originality search.
+  uploadLibraryEntry(
+    creatorId: string,
+    file: File,
+    signal?: AbortSignal,
+  ): Promise<LibraryUploadResponse> {
+    const fd = new FormData();
+    fd.append('creator_id', creatorId);
+    fd.append('file', file);
+    return postForm<LibraryUploadResponse>('/library/upload', fd, signal);
   },
 
-  streamImproveUrl(jobId: string): string {
-    return url(`/stream-improve/${jobId}`);
+  async getLibrary(creatorId: string, signal?: AbortSignal): Promise<LibraryListResponse> {
+    const res = await fetch(url(`/library/${encodeURIComponent(creatorId)}`), { signal });
+    if (!res.ok) throw new BrainClientError(`/library/${creatorId} → ${res.status}`);
+    return (await res.json()) as LibraryListResponse;
+  },
+
+  predictSimilarity(
+    jobId: string,
+    creatorId: string,
+    signal?: AbortSignal,
+  ): Promise<SimilarityResponse> {
+    return postJson<SimilarityResponse>('/similarity', { job_id: jobId, creator_id: creatorId }, signal);
+  },
+
+  resolveCacheUrl(pathOrUrl: string): string {
+    if (pathOrUrl.startsWith('http')) return pathOrUrl;
+    return `${BASE.replace(/\/$/, '')}${pathOrUrl}`;
+  },
+
+  streamUrl(jobId: string): string {
+    return url(`/stream/${jobId}`);
   },
 };
 
@@ -147,38 +173,3 @@ export function subscribeAnalysis(streamUrl: string, h: AnalysisStreamHandlers):
   return () => es.close();
 }
 
-export interface AutoImproveStreamHandlers extends AnalysisStreamHandlers {
-  onReasoning?: (text: string) => void;
-  onCutting?: (cut: { operation: string; params: Record<string, number> }) => void;
-  onCutApplied?: (v2Url: string) => void;
-  onReanalyzing?: () => void;
-}
-
-export function subscribeAutoImprove(streamUrl: string, h: AutoImproveStreamHandlers): () => void {
-  const es = new EventSource(streamUrl);
-  let completed = false;
-  es.addEventListener('reasoning', (e: MessageEvent) => h.onReasoning?.(JSON.parse(e.data).text));
-  es.addEventListener('cutting', (e: MessageEvent) => h.onCutting?.(JSON.parse(e.data).cut));
-  es.addEventListener('cut_applied', (e: MessageEvent) =>
-    h.onCutApplied?.(JSON.parse(e.data).v2_url),
-  );
-  es.addEventListener('reanalyzing', () => h.onReanalyzing?.());
-  es.addEventListener('brain_frame', (e: MessageEvent) =>
-    h.onBrainFrame?.(JSON.parse(e.data)),
-  );
-  es.addEventListener('complete', (e: MessageEvent) => {
-    completed = true;
-    try {
-      h.onComplete?.(JSON.parse(e.data));
-    } catch (err) {
-      console.error('[brainClient] complete parse failed', err);
-    }
-    es.close();
-  });
-  es.addEventListener('error', (e) => {
-    if (completed || es.readyState === EventSource.CLOSED) return;
-    h.onError?.(e);
-    es.close();
-  });
-  return () => es.close();
-}

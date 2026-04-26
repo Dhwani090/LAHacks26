@@ -45,50 +45,67 @@ class TribeService:
 
     def analyze_text(self, text: str) -> dict[str, Any]:
         """Stub: returns synthetic 30-frame analysis. Replaced in P1-01."""
-        return self._stub_result(mode="text", duration_s=30, has_visual=False, has_audio=False)
+        return self._stub_result(seed=hash(text) & 0xFFFF, mode="text", duration_s=30, has_visual=False, has_audio=False)
 
     def analyze_audio(self, path: Path) -> dict[str, Any]:
-        return self._stub_result(mode="audio", duration_s=30, has_visual=False, has_audio=True)
+        return self._stub_result(seed=self._path_seed(path), mode="audio", duration_s=30, has_visual=False, has_audio=True)
 
     def analyze_video(self, path: Path) -> dict[str, Any]:
-        return self._stub_result(mode="video", duration_s=30, has_visual=True, has_audio=True)
+        return self._stub_result(seed=self._path_seed(path), mode="video", duration_s=30, has_visual=True, has_audio=True)
 
     @staticmethod
-    def _stub_result(mode: str, duration_s: int, has_visual: bool, has_audio: bool) -> dict[str, Any]:
+    def _path_seed(path: Path) -> int:
+        # Filename-derived seed so each candidate produces a visibly different brain.
+        # When real TRIBE lands, this is replaced by actual per-cut inference.
+        return hash(path.name) & 0xFFFF
+
+    @staticmethod
+    def _stub_result(seed: int, mode: str, duration_s: int, has_visual: bool, has_audio: bool) -> dict[str, Any]:
         # Amplitude tuned so vertex z-scores reach ~±2.5 — required for the frontend
         # colormap (colormap.ts) to actually paint hot orange instead of staying gray-blue.
+        # Seed adds per-candidate phase/scale shift so different cuts produce visibly
+        # different brains.
         n = int(duration_s)
         n_v = config.TRIBE_VERTEX_COUNT
-        # Precompute per-vertex hotspot weight so a few regions glow together rather than
-        # a uniform flat field — looks brain-shaped instead of static.
-        hotspots = [n_v // 6, n_v // 3, n_v // 2, (2 * n_v) // 3, (5 * n_v) // 6]
+        phase = (seed % 360) * math.pi / 180
+        scale = 0.85 + (seed % 50) / 200.0
+        # Hotspot centers shift with seed so each candidate lights up different regions.
+        hot_offset = (seed % n_v) // 7
+        hotspots = [
+            (n_v // 6 + hot_offset) % n_v,
+            (n_v // 3 + hot_offset) % n_v,
+            (n_v // 2 + hot_offset) % n_v,
+            ((2 * n_v) // 3 + hot_offset) % n_v,
+            ((5 * n_v) // 6 + hot_offset) % n_v,
+        ]
         sigma_sq_2 = 2.0 * 700.0 * 700.0
         hotspot_weight = [
             sum(math.exp(-((v - h) ** 2) / sigma_sq_2) for h in hotspots) for v in range(n_v)
         ]
         frames = []
         for t in range(n):
-            pulse = math.sin(t * 0.55) * 1.6 + 0.4  # global breath, pushes peaks into hot range
+            pulse = math.sin(t * 0.55 + phase) * 1.6 + 0.4
             ripple_phase = t * 31
             activation = [
-                pulse * hotspot_weight[v] * 1.9
-                + math.sin((v + ripple_phase) * 0.011) * 0.5
+                pulse * hotspot_weight[v] * 1.9 * scale
+                + math.sin((v + ripple_phase) * 0.011 + phase) * 0.5
                 for v in range(n_v)
             ]
             frames.append({"t": float(t), "activation": activation})
         engagement = {
-            "language": [math.sin(t * 0.3) * 1.4 + 0.3 for t in range(n)],
+            "language": [math.sin(t * 0.3 + phase) * 1.4 + 0.3 for t in range(n)],
         }
         if has_audio:
-            engagement["auditory"] = [math.cos(t * 0.25) * 1.2 + 0.2 for t in range(n)]
+            engagement["auditory"] = [math.cos(t * 0.25 + phase) * 1.2 + 0.2 for t in range(n)]
         if has_visual:
-            engagement["visual"] = [math.sin(t * 0.2 + 1) * 1.5 for t in range(n)]
+            engagement["visual"] = [math.sin(t * 0.2 + 1 + phase) * 1.5 for t in range(n)]
+        cold_start = 8.0 + (seed % 8)
         return {
             "mode": mode,
             "duration_s": duration_s,
             "brain_frames": frames,
             "engagement_curves": engagement,
-            "cold_zones": [{"start": 12.0, "end": 16.0, "region": "language", "depth": -0.9}],
+            "cold_zones": [{"start": cold_start, "end": cold_start + 4.0, "region": "language", "depth": -0.9 - (seed % 10) / 50.0}],
         }
 
 

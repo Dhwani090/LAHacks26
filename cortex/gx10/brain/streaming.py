@@ -1,6 +1,6 @@
 # SSE event helpers — formats payloads for sse_starlette.EventSourceResponse.
-# PRD §9 (SSE event order) + skills/auto-improve/SKILL.md.
-# Events emitted: started, transcript, brain_frame, cold_zones, suggestions, complete.
+# PRD §9 (SSE event order).
+# Events emitted: started, transcript, brain_frame, cold_zones, suggestions, complete, error.
 # Each helper returns a dict with {"event": ..., "data": <json string>}.
 # See docs/PRD.md §9.
 
@@ -27,22 +27,6 @@ def cold_zones(zones: list[dict[str, Any]]) -> dict[str, str]:
 
 def suggestions(items: list[dict[str, Any]]) -> dict[str, str]:
     return {"event": "suggestions", "data": json.dumps({"suggestions": items})}
-
-
-def reasoning(text: str) -> dict[str, str]:
-    return {"event": "reasoning", "data": json.dumps({"text": text})}
-
-
-def cutting(cut: dict[str, Any]) -> dict[str, str]:
-    return {"event": "cutting", "data": json.dumps({"cut": cut})}
-
-
-def cut_applied(v2_url: str) -> dict[str, str]:
-    return {"event": "cut_applied", "data": json.dumps({"v2_url": v2_url})}
-
-
-def reanalyzing() -> dict[str, str]:
-    return {"event": "reanalyzing", "data": "{}"}
 
 
 def complete(payload: dict[str, Any] | None = None) -> dict[str, str]:

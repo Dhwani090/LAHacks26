@@ -14,6 +14,8 @@ env/
 
 # Cortex runtime
 cortex/gx10/cache/
+# Per-machine yt-dlp output (Phase 1 of corpus build — see docs/TASKS.md PH-I)
+cortex/gx10/downloads/
 
 # Claude Code local settings
 .claude/settings.local.json
