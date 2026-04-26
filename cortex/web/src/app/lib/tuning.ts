@@ -20,8 +20,11 @@ export const TUNING = {
   // 4 iters on the ICBM152 LH/RH mesh produces the "growing pool" look the
   // demo wants instead of speckled per-vertex thresholding.
   SPATIAL_SMOOTH_ITERS: 4,
-  IDLE_BREATHE_HZ: 0.08,
-  IDLE_BREATHE_AMPLITUDE_Z: 0.45,
+  // Idle-mode pulse — needs to read as "alive" from across the venue.
+  // 0.15Hz ≈ 6.7s breathing cycle, fast enough to feel like a heartbeat
+  // without looking restless.
+  IDLE_BREATHE_HZ: 0.15,
+  IDLE_BREATHE_AMPLITUDE_Z: 0.6,
 
   // Activation colormap
   COLD_THRESHOLD_Z: -0.5,

@@ -10,6 +10,7 @@ import type {
   EditSuggestion,
   LibraryListResponse,
   LibraryUploadResponse,
+  PredictEngagementResponse,
   SimilarityResponse,
   TranscriptWord,
 } from './types';
@@ -26,6 +27,8 @@ export interface HealthResponse {
   status: 'ok' | 'degraded' | 'loading';
   tribe_loaded: boolean;
   gemma_loaded: boolean;
+  predictor_loaded?: boolean;
+  corpus_size?: number;
   cache_size: number;
   gx10_uptime_s: number;
 }
@@ -81,6 +84,25 @@ export const brainClient = {
     return postForm<JobAccepted>('/analyze/video', fd, signal);
   },
 
+  analyzeHero(
+    slug: string,
+    mode: 'text' | 'audio' | 'video' = 'video',
+    signal?: AbortSignal,
+  ): Promise<JobAccepted> {
+    const fd = new FormData();
+    fd.append('slug', slug);
+    fd.append('mode', mode);
+    return postForm<JobAccepted>('/analyze/hero', fd, signal);
+  },
+
+  async listHeroes(
+    signal?: AbortSignal,
+  ): Promise<{ heroes: { mode: 'text' | 'audio' | 'video'; slug: string }[] }> {
+    const res = await fetch(url('/heroes'), { signal });
+    if (!res.ok) throw new BrainClientError(`/heroes → ${res.status}`);
+    return (await res.json()) as { heroes: { mode: 'text' | 'audio' | 'video'; slug: string }[] };
+  },
+
   applySuggestion(
     clipId: string,
     suggestionId: string,
@@ -88,6 +110,18 @@ export const brainClient = {
     signal?: AbortSignal,
   ): Promise<{ new_text?: string; job_id?: string }> {
     return postJson('/apply-suggestion', { clip_id: clipId, suggestion_id: suggestionId, action }, signal);
+  },
+
+  predictEngagement(
+    jobId: string,
+    followers: number,
+    signal?: AbortSignal,
+  ): Promise<PredictEngagementResponse> {
+    return postJson<PredictEngagementResponse>(
+      '/predict-engagement',
+      { job_id: jobId, followers },
+      signal,
+    );
   },
 
   // §11.6 — creator library + originality search.
@@ -102,18 +136,54 @@ export const brainClient = {
     return postForm<LibraryUploadResponse>('/library/upload', fd, signal);
   },
 
+  addJobToLibrary(
+    jobId: string,
+    creatorId: string,
+    videoId?: string,
+    signal?: AbortSignal,
+  ): Promise<LibraryUploadResponse> {
+    const body: { job_id: string; creator_id: string; video_id?: string } = {
+      job_id: jobId,
+      creator_id: creatorId,
+    };
+    if (videoId && videoId.trim()) body.video_id = videoId.trim();
+    return postJson<LibraryUploadResponse>('/library/from-job', body, signal);
+  },
+
   async getLibrary(creatorId: string, signal?: AbortSignal): Promise<LibraryListResponse> {
     const res = await fetch(url(`/library/${encodeURIComponent(creatorId)}`), { signal });
     if (!res.ok) throw new BrainClientError(`/library/${creatorId} → ${res.status}`);
     return (await res.json()) as LibraryListResponse;
   },
 
+  async deleteLibraryEntry(
+    creatorId: string,
+    videoId: string,
+    signal?: AbortSignal,
+  ): Promise<{ creator_id: string; video_id: string; library_size: number }> {
+    const res = await fetch(
+      url(`/library/${encodeURIComponent(creatorId)}/${encodeURIComponent(videoId)}`),
+      { method: 'DELETE', signal },
+    );
+    if (!res.ok) throw new BrainClientError(`/library/${creatorId}/${videoId} → ${res.status}`);
+    return (await res.json()) as { creator_id: string; video_id: string; library_size: number };
+  },
+
   predictSimilarity(
     jobId: string,
     creatorId: string,
+    opts?: { lastN?: number | null; sinceDays?: number | null },
     signal?: AbortSignal,
   ): Promise<SimilarityResponse> {
-    return postJson<SimilarityResponse>('/similarity', { job_id: jobId, creator_id: creatorId }, signal);
+    const body: {
+      job_id: string;
+      creator_id: string;
+      last_n?: number | null;
+      since_days?: number | null;
+    } = { job_id: jobId, creator_id: creatorId };
+    if (opts?.lastN !== undefined) body.last_n = opts.lastN;
+    if (opts?.sinceDays !== undefined) body.since_days = opts.sinceDays;
+    return postJson<SimilarityResponse>('/similarity', body, signal);
   },
 
   resolveCacheUrl(pathOrUrl: string): string {

@@ -22,7 +22,7 @@ from . import config, models, streaming
 from .cache import hero_cache
 from .corpus import corpus
 from .gemma import gemma_service
-from .library import LibraryEntry, library_registry, now_iso, rank_similar
+from .library import LibraryEntry, filter_candidates, library_registry, now_iso, rank_similar
 from .pooling import frames_to_array, pool_tribe_output, roi_mean_vector
 from .predictor import load_default_predictor, predictor
 from .text_embed import embed_text
@@ -117,13 +117,55 @@ async def analyze_video(
         _JOBS[job_id] = {
             "mode": "video",
             "input": {"path": str(tmp_path), "digest": digest},
+            "source_name": file.filename or "draft.mp4",
             "cached_result": cached,
         }
         eta = 1_000 if cached is not None else 600_000
     else:
-        _JOBS[job_id] = {"mode": "video", "input": {"cloudinary_public_id": cloudinary_public_id}}
+        _JOBS[job_id] = {
+            "mode": "video",
+            "input": {"cloudinary_public_id": cloudinary_public_id},
+            "source_name": cloudinary_public_id or "draft",
+        }
         eta = 600_000
     return models.JobAccepted(job_id=job_id, mode="video", estimated_ms=eta)
+
+
+@app.get("/heroes")
+async def heroes() -> dict[str, list[dict[str, Any]]]:
+    """List the hero clips available for one-click demo replay."""
+    out: list[dict[str, Any]] = []
+    for mode in ("video", "audio", "text"):
+        # `_store` keys look like `hero_video:slug` — see HeroCache.load_heroes.
+        prefix = f"hero_{mode}:"
+        for key in hero_cache._store:
+            if key.startswith(prefix):
+                slug = key[len(prefix):]
+                out.append({"mode": mode, "slug": slug})
+    return {"heroes": out}
+
+
+@app.post("/analyze/hero", response_model=models.JobAccepted)
+async def analyze_hero(slug: str = Form(...), mode: str = Form("video")) -> models.JobAccepted:
+    """Demo-friendly fast path. If the hero JSON is cached, /stream replays it
+    instantly; otherwise we fall through to stub TRIBE on a synthetic input so
+    the demo never blocks on an empty cache."""
+    if mode not in ("video", "audio", "text"):
+        raise HTTPException(status_code=400, detail="mode must be video|audio|text")
+    job_id = str(uuid.uuid4())
+    cached = hero_cache.get_hero(mode, slug)
+    estimated = 1_500 if cached is not None else {
+        "text": config.TEXT_BUDGET_S,
+        "audio": config.AUDIO_BUDGET_S,
+        "video": config.VIDEO_BUDGET_S,
+    }[mode] * 1000
+    _JOBS[job_id] = {
+        "mode": mode,
+        "input": {"hero_slug": slug},
+        "source_name": f"hero_{slug}",
+        "hero_payload": cached,
+    }
+    return models.JobAccepted(job_id=job_id, mode=mode, estimated_ms=int(estimated))
 
 
 @app.get("/stream/{job_id}")
@@ -138,12 +180,19 @@ async def stream(job_id: str) -> EventSourceResponse:
         yield streaming.started(mode=mode, estimated_ms=int(budgets[mode] * 1000))
 
         try:
-            if mode == "text":
+            # Hero replay: if the job carries a cached hero payload, surface it
+            # directly. Falls through to live inference when the cache miss path
+            # populates `hero_payload = None`.
+            hero_payload = job.get("hero_payload")
+            if hero_payload is not None:
+                result = hero_payload
+            elif mode == "text":
                 result = tribe_service.analyze_text(job["input"]["text"])
             elif mode == "audio":
-                result = tribe_service.analyze_audio(Path(job["input"]["path"]))
+                audio_path = job["input"].get("path") or "stub.wav"
+                result = tribe_service.analyze_audio(Path(audio_path))
             else:
-                path = Path(job["input"].get("path") or "stub.mp4")
+                path = Path(job["input"].get("path") or job["input"].get("hero_slug") or "stub.mp4")
                 cached = job.get("cached_result")
                 if cached is not None:
                     logger.info("video cache HIT for job %s (digest=%s)", job_id, job["input"].get("digest", "")[:12])
@@ -337,6 +386,79 @@ async def library_upload(
     )
 
 
+@app.post("/library/from-job", response_model=models.LibraryUploadResponse)
+async def library_from_job(req: models.LibraryFromJobRequest) -> models.LibraryUploadResponse:
+    """Add a completed /analyze/video job to the creator's library without
+    re-running TRIBE+Whisper. Reuses the pooled features, ROI means, and
+    transcript embedding cached in _JOBS during /stream.
+
+    Use case: user uploaded a draft to /predict, watched the brain pulse,
+    decided it's worth posting, hits "Add to Library." We've already paid
+    for inference — no reason to do it twice.
+    """
+    if not req.creator_id.strip():
+        raise HTTPException(status_code=400, detail="creator_id required")
+    job = _JOBS.get(req.job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="unknown job_id")
+    if job.get("mode") != "video":
+        raise HTTPException(status_code=400, detail="library entries are video-only")
+
+    pooled = job.get("pooled_features")
+    roi_means = job.get("roi_means")
+    if not pooled or not roi_means:
+        raise HTTPException(status_code=409, detail="job has no pooled features yet — wait for /stream complete")
+
+    source_name = job.get("source_name") or "draft.mp4"
+    derived_id = Path(source_name).stem or req.job_id[:12]
+    video_id = (req.video_id or derived_id).strip() or req.job_id[:12]
+
+    transcript_text = job.get("transcript_text") or ""
+    text_emb = job.get("text_embedding")
+    if text_emb is not None:
+        text_vec_arr = list(text_emb)
+    else:
+        text_vec_arr = embed_text(transcript_text).tolist()
+
+    import numpy as np
+    entry = LibraryEntry(
+        video_id=video_id,
+        uploaded_at=now_iso(),
+        duration_s=float(job.get("duration_s") or 0.0),
+        tribe_pooled=np.asarray(pooled, dtype=np.float32),
+        roi_means=np.asarray(roi_means, dtype=np.float32),
+        transcript=transcript_text,
+        text_embedding=np.asarray(text_vec_arr, dtype=np.float32),
+        thumbnail_url=None,
+    )
+    library_registry.save_entry(req.creator_id, entry)
+    return models.LibraryUploadResponse(
+        library_entry_id=video_id,
+        library_size=library_registry.size(req.creator_id),
+    )
+
+
+@app.delete("/library/{creator_id}/{video_id}")
+async def library_delete(creator_id: str, video_id: str) -> dict[str, Any]:
+    """Remove one entry from the creator's library. Idempotent — calling it
+    on an unknown video_id returns 404 so the UI can surface "already gone."
+    Use case: creator added duplicates or a wrong file and wants to clean up
+    before running similarity search."""
+    if not creator_id.strip():
+        raise HTTPException(status_code=400, detail="creator_id required")
+    try:
+        existed = library_registry.delete_entry(creator_id, video_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    if not existed:
+        raise HTTPException(status_code=404, detail="library entry not found")
+    return {
+        "creator_id": creator_id,
+        "video_id": video_id,
+        "library_size": library_registry.size(creator_id),
+    }
+
+
 @app.get("/library/{creator_id}", response_model=models.LibraryListResponse)
 async def library_list(creator_id: str) -> models.LibraryListResponse:
     entries = library_registry.load_creator_library(creator_id)
@@ -374,8 +496,26 @@ async def similarity(req: models.SimilarityRequest) -> models.SimilarityResponse
         return models.SimilarityResponse(
             matches=[],
             library_size=len(library),
+            candidate_size=0,
             creator_id=req.creator_id,
             message=f"upload at least {config.SIMILARITY_MIN_LIBRARY_SIZE} past clips to enable originality search",
+        )
+
+    candidates = filter_candidates(
+        library,
+        last_n=req.last_n,
+        since_days=req.since_days,
+    )
+    if len(candidates) < config.SIMILARITY_MIN_LIBRARY_SIZE:
+        # Filter narrowed the set below the cold-start threshold — tell the
+        # creator instead of returning a noisy ranking over 1-2 clips.
+        return models.SimilarityResponse(
+            matches=[],
+            library_size=len(library),
+            candidate_size=len(candidates),
+            creator_id=req.creator_id,
+            filter={"last_n": req.last_n, "since_days": req.since_days},
+            message=f"only {len(candidates)} clip(s) match your filter — widen the window or upload more",
         )
 
     text_emb = job.get("text_embedding")
@@ -389,7 +529,7 @@ async def similarity(req: models.SimilarityRequest) -> models.SimilarityResponse
         draft_brain=np.asarray(pooled, dtype=np.float32),
         draft_text=draft_text,
         draft_roi_means=np.asarray(roi_means, dtype=np.float32),
-        library=library,
+        library=candidates,
     )
     return models.SimilarityResponse(
         matches=[
@@ -406,6 +546,8 @@ async def similarity(req: models.SimilarityRequest) -> models.SimilarityResponse
             for m in matches
         ],
         library_size=len(library),
+        candidate_size=len(candidates),
         creator_id=req.creator_id,
         weighting={"brain": config.SIMILARITY_BRAIN_WEIGHT, "text": config.SIMILARITY_TEXT_WEIGHT},
+        filter={"last_n": req.last_n, "since_days": req.since_days},
     )

@@ -73,7 +73,14 @@ export function StatusChip() {
       className={`flex items-center gap-2 rounded-full border px-3 py-1 text-[10px] uppercase tracking-[0.2em] ${palette[state]}`}
       title={
         detail && typeof detail.gx10_uptime_s === 'number'
-          ? `uptime ${detail.gx10_uptime_s.toFixed(0)}s · cache ${detail.cache_size ?? 0}`
+          ? [
+              `uptime ${detail.gx10_uptime_s.toFixed(0)}s`,
+              `cache ${detail.cache_size ?? 0}`,
+              detail.predictor_loaded === false ? 'predictor loading' : null,
+              typeof detail.corpus_size === 'number' ? `corpus ${detail.corpus_size}` : null,
+            ]
+              .filter(Boolean)
+              .join(' · ')
           : ''
       }
     >

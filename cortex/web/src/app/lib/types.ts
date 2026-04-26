@@ -44,6 +44,18 @@ export interface TranscriptWord {
 // Common keys for video: "visual", "auditory", "language". Audio omits "visual".
 export type EngagementCurves = Record<string, number[]>;
 
+// §11.1 — engagement prediction.
+export interface PredictEngagementResponse {
+  predicted_rate: number;
+  percentile: number;
+  interpretation: string;
+  corpus_size: number;
+  predictor_version: string;
+  followers_used: number;
+  duration_s: number;
+  n_cold_zones: number;
+}
+
 // §11.6 — creator library + originality search.
 export type RoiName = 'visual' | 'auditory' | 'language';
 
@@ -67,8 +79,10 @@ export interface SimilarityMatch {
 export interface SimilarityResponse {
   matches: SimilarityMatch[];
   library_size: number;
+  candidate_size: number;
   creator_id: string;
   weighting?: { brain: number; text: number };
+  filter?: { last_n: number | null; since_days: number | null };
   message?: string;
 }
 

@@ -11,13 +11,11 @@ import { frameBus } from '../lib/frameBus';
 import { TUNING } from '../lib/tuning';
 import { useAppState } from '../state/AppState';
 import type { ColdZone, EngagementCurves, TranscriptWord } from '../lib/types';
+import { DEMO_CREATOR_ID } from '../lib/creator';
+import { AddToLibraryButton } from './AddToLibraryButton';
+import { EngagementCard } from './EngagementCard';
 import { EngagementTimeline } from './EngagementTimeline';
-import { LibraryUploader } from './LibraryUploader';
 import { SimilarityPanel } from './SimilarityPanel';
-
-// Single-creator demo build — every upload goes into one library bucket.
-// PRD §11.6 caveat: multi-tenant comes after the hackathon.
-const DEMO_CREATOR_ID = 'demo';
 
 type Phase = 'idle' | 'uploading' | 'tribe' | 'rendering' | 'feedback' | 'done';
 
@@ -29,6 +27,7 @@ const PHASE_LABEL: Record<Phase, string> = {
   feedback: 'gemma writing feedback',
   done: 'complete',
 };
+
 
 export function VideoSurface() {
   const [file, setFile] = useState<File | null>(null);
@@ -57,7 +56,6 @@ export function VideoSurface() {
   const setDurationS = useAppState((s) => s.setDurationS);
   const setError = useAppState((s) => s.setError);
   const resetAnalysis = useAppState((s) => s.resetAnalysis);
-  const [librarySize, setLibrarySize] = useState<number | null>(null);
 
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const unsubRef = useRef<(() => void) | null>(null);
@@ -101,9 +99,7 @@ export function VideoSurface() {
     if (progressTimerRef.current) clearInterval(progressTimerRef.current);
   }, []);
 
-  function handleDiagnose() {
-    if (!file || busy) return;
-
+  function runJob(jobPromise: Promise<{ job_id: string; estimated_ms?: number }>) {
     unsubRef.current?.();
     resetAnalysis();
     frameBus.reset();
@@ -111,8 +107,7 @@ export function VideoSurface() {
     setPhase('uploading');
     startProgress(60_000);
 
-    brainClient
-      .analyzeVideo(file)
+    jobPromise
       .then((job) => {
         setJobId(job.job_id);
         setClipId(job.job_id);
@@ -157,6 +152,19 @@ export function VideoSurface() {
       });
   }
 
+  function handleDiagnose() {
+    if (!file || busy) return;
+    runJob(brainClient.analyzeVideo(file));
+  }
+
+  function handleTrySample() {
+    if (busy) return;
+    // Demo-friendly fast path: backend serves a cached hero result instantly,
+    // or falls back to stub TRIBE on a synthetic input. Either way <5s, no
+    // upload required — judges hit one button and watch the brain pulse.
+    runJob(brainClient.analyzeHero('hero1', 'video'));
+  }
+
   function handlePickColdZone(zone: ColdZone) {
     if (videoRef.current) {
       videoRef.current.currentTime = zone.start;
@@ -192,18 +200,28 @@ export function VideoSurface() {
             className="max-h-[260px] w-full shrink-0 rounded-md bg-black object-contain"
           />
         ) : (
-          <label className="flex min-h-[200px] flex-1 cursor-pointer flex-col items-center justify-center gap-3 rounded-md border border-dashed border-white/15 bg-black/20 p-6 text-center text-sm text-white/50 transition-colors hover:border-orange-400/40 hover:text-white/80">
-            <input
-              type="file"
-              accept="video/mp4,video/quicktime"
-              className="hidden"
-              onChange={(e) => setFile(e.target.files?.[0] ?? null)}
-            />
-            <div>
-              <div className="text-base text-white/80">Drop video · 15–180s</div>
-              <div className="mt-1 text-xs text-white/30">mp4 · mov</div>
-            </div>
-          </label>
+          <div className="flex min-h-[200px] flex-1 flex-col items-stretch gap-2">
+            <label className="flex flex-1 cursor-pointer flex-col items-center justify-center gap-3 rounded-md border border-dashed border-white/15 bg-black/20 p-6 text-center text-sm text-white/50 transition-colors hover:border-orange-400/40 hover:text-white/80">
+              <input
+                type="file"
+                accept="video/mp4,video/quicktime"
+                className="hidden"
+                onChange={(e) => setFile(e.target.files?.[0] ?? null)}
+              />
+              <div>
+                <div className="text-base text-white/80">Drop video · 15–180s</div>
+                <div className="mt-1 text-xs text-white/30">mp4 · mov</div>
+              </div>
+            </label>
+            <button
+              type="button"
+              onClick={handleTrySample}
+              disabled={busy}
+              className="self-center rounded-full border border-white/15 px-4 py-1.5 text-[11px] uppercase tracking-[0.22em] text-white/55 transition-colors hover:border-orange-400/40 hover:text-orange-200 disabled:cursor-not-allowed disabled:opacity-40"
+            >
+              {busy ? 'loading sample…' : 'or try a sample clip →'}
+            </button>
+          </div>
         )}
 
         {(busy || phase === 'done') && (
@@ -261,15 +279,19 @@ export function VideoSurface() {
           </div>
         )}
 
+        {status === 'complete' && jobId && <EngagementCard jobId={jobId} />}
+
         {status === 'complete' && jobId && (
-          <SimilarityPanel
-            jobId={jobId}
-            creatorId={DEMO_CREATOR_ID}
-            refreshKey={librarySize ?? 0}
-          />
+          <SimilarityPanel jobId={jobId} creatorId={DEMO_CREATOR_ID} />
         )}
 
-        <LibraryUploader creatorId={DEMO_CREATOR_ID} onLibraryChange={setLibrarySize} />
+        {status === 'complete' && jobId && (
+          <AddToLibraryButton
+            jobId={jobId}
+            creatorId={DEMO_CREATOR_ID}
+            defaultName={file?.name?.replace(/\.[^.]+$/, '') ?? undefined}
+          />
+        )}
       </div>
 
       <div className="flex shrink-0 items-center justify-between text-xs text-white/50">

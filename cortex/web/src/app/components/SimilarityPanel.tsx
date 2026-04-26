@@ -16,6 +16,41 @@ interface Props {
   refreshKey?: number;
 }
 
+// Candidate-set filter presets. The default ('last-50') matches PRD §11.6 —
+// recent voice is the relevant comparison set; the full back catalog dilutes
+// the signal because old work is often a different style.
+type FilterPresetId =
+  | 'last-5'
+  | 'last-10'
+  | 'last-20'
+  | 'last-50'
+  | 'past-week'
+  | 'past-month'
+  | 'past-3-months'
+  | 'all-time';
+
+interface FilterPreset {
+  id: FilterPresetId;
+  label: string;
+  group: 'count' | 'time' | 'all';
+  // Backend params: pass null to mean "no cap on that axis."
+  lastN: number | null;
+  sinceDays: number | null;
+}
+
+const FILTER_PRESETS: FilterPreset[] = [
+  { id: 'last-5', label: 'Last 5 clips', group: 'count', lastN: 5, sinceDays: null },
+  { id: 'last-10', label: 'Last 10 clips', group: 'count', lastN: 10, sinceDays: null },
+  { id: 'last-20', label: 'Last 20 clips', group: 'count', lastN: 20, sinceDays: null },
+  { id: 'last-50', label: 'Last 50 clips', group: 'count', lastN: 50, sinceDays: null },
+  { id: 'past-week', label: 'Past week', group: 'time', lastN: null, sinceDays: 7 },
+  { id: 'past-month', label: 'Past month', group: 'time', lastN: null, sinceDays: 30 },
+  { id: 'past-3-months', label: 'Past 3 months', group: 'time', lastN: null, sinceDays: 90 },
+  { id: 'all-time', label: 'All time', group: 'all', lastN: null, sinceDays: null },
+];
+
+const DEFAULT_FILTER: FilterPresetId = 'last-50';
+
 const ROI_LABEL: Record<RoiName, string> = {
   visual: 'visual',
   auditory: 'auditory',
@@ -40,17 +75,24 @@ export function SimilarityPanel({ jobId, creatorId, refreshKey = 0 }: Props) {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [openMatch, setOpenMatch] = useState<SimilarityMatch | null>(null);
+  const [filterId, setFilterId] = useState<FilterPresetId>(DEFAULT_FILTER);
 
   useEffect(() => {
     if (!jobId || !creatorId) {
       setData(null);
       return;
     }
+    const preset = FILTER_PRESETS.find((p) => p.id === filterId) ?? FILTER_PRESETS[3];
     const ac = new AbortController();
     setLoading(true);
     setError(null);
     brainClient
-      .predictSimilarity(jobId, creatorId, ac.signal)
+      .predictSimilarity(
+        jobId,
+        creatorId,
+        { lastN: preset.lastN, sinceDays: preset.sinceDays },
+        ac.signal,
+      )
       .then((res) => setData(res))
       .catch((err) => {
         if (ac.signal.aborted) return;
@@ -59,7 +101,7 @@ export function SimilarityPanel({ jobId, creatorId, refreshKey = 0 }: Props) {
       })
       .finally(() => setLoading(false));
     return () => ac.abort();
-  }, [jobId, creatorId, refreshKey]);
+  }, [jobId, creatorId, refreshKey, filterId]);
 
   if (!jobId) return null;
 
@@ -91,15 +133,43 @@ export function SimilarityPanel({ jobId, creatorId, refreshKey = 0 }: Props) {
     );
   }
 
+  // Filter dropdown is always rendered (even when matches array is empty due
+  // to a too-narrow filter), so the user can widen it without re-triggering.
+  const filterDropdown = (
+    <FilterSelect
+      value={filterId}
+      onChange={setFilterId}
+      candidateCount={data.candidate_size}
+      libraryCount={data.library_size}
+    />
+  );
+
+  // Filter narrowed below the cold-start threshold — show the widen-it message
+  // alongside the dropdown so the user can fix it without scrolling away.
+  if (data.matches.length === 0 && data.message) {
+    return (
+      <div className="flex flex-col gap-3 rounded-md border border-white/10 bg-white/5 p-4">
+        <div className="flex items-baseline justify-between">
+          <div className="text-xs uppercase tracking-[0.2em] text-white/50">originality</div>
+          {filterDropdown}
+        </div>
+        <div className="text-xs text-white/55">{data.message}</div>
+      </div>
+    );
+  }
+
   if (data.matches.length === 0) return null;
 
   return (
     <>
       <div className="flex flex-col gap-3 rounded-md border border-white/10 bg-white/5 p-4">
-        <div className="flex items-baseline justify-between">
+        <div className="flex items-baseline justify-between gap-3">
           <div className="text-xs uppercase tracking-[0.2em] text-white/50">originality</div>
-          <div className="text-[10px] text-white/30">
-            ranked vs. {data.library_size} past clips
+          <div className="flex items-baseline gap-3">
+            <div className="text-[10px] text-white/30">
+              ranked vs. {data.candidate_size} of {data.library_size} clip{data.library_size === 1 ? '' : 's'}
+            </div>
+            {filterDropdown}
           </div>
         </div>
         <div className="grid grid-cols-1 gap-2 sm:grid-cols-3">
@@ -175,6 +245,57 @@ function MatchDrawer({ match, onClose }: { match: SimilarityMatch; onClose: () =
         </div>
       </aside>
     </div>
+  );
+}
+
+function FilterSelect({
+  value,
+  onChange,
+  candidateCount,
+  libraryCount,
+}: {
+  value: FilterPresetId;
+  onChange: (next: FilterPresetId) => void;
+  candidateCount: number;
+  libraryCount: number;
+}) {
+  // Hide presets that would make the candidate set strictly smaller than what
+  // we already have available. e.g. don't show "Last 50" if the library only
+  // has 12 clips — the option would behave identically to "All time."
+  const visible = FILTER_PRESETS.filter((p) => {
+    if (p.group === 'count' && p.lastN !== null && p.lastN >= libraryCount && libraryCount > 0) {
+      // "Last 50" with 12 clips → same as all-time, drop it.
+      return false;
+    }
+    return true;
+  });
+  return (
+    <select
+      value={value}
+      onChange={(e) => onChange(e.target.value as FilterPresetId)}
+      className="rounded-md border border-white/10 bg-black/30 px-2 py-1 text-[11px] text-white/75 outline-none transition-colors hover:border-white/20 focus:border-orange-400/60"
+      title={`comparing against ${candidateCount} of ${libraryCount} clips`}
+    >
+      <optgroup label="By count">
+        {visible
+          .filter((p) => p.group === 'count')
+          .map((p) => (
+            <option key={p.id} value={p.id}>
+              {p.label}
+            </option>
+          ))}
+      </optgroup>
+      <optgroup label="By date">
+        {visible
+          .filter((p) => p.group === 'time')
+          .map((p) => (
+            <option key={p.id} value={p.id}>
+              {p.label}
+            </option>
+          ))}
+      </optgroup>
+      <option value="all-time">All time</option>
+    </select>
   );
 }
 
