@@ -126,6 +126,16 @@ function InspirationCard({ rec }: { rec: InspirationRecommendation }) {
             alt=""
             className="h-full w-full object-cover"
             onError={() => setThumbBroken(true)}
+            // YouTube's CDN returns a 120×90 placeholder PNG (200 OK) for
+            // missing/deleted video IDs, so onError never fires. Detect the
+            // placeholder via natural dimensions instead — real hqdefault is
+            // 480×360. Anything noticeably smaller is YouTube saying "video gone".
+            onLoad={(e) => {
+              const img = e.currentTarget;
+              if (img.naturalWidth > 0 && img.naturalWidth < 200) {
+                setThumbBroken(true);
+              }
+            }}
             loading="lazy"
           />
         )}
