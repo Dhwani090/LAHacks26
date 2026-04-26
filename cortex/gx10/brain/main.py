@@ -547,6 +547,6 @@ async def curator_status() -> models.CuratorStatusResponse:
         last_iter_at=state.last_iter_at,
         last_iter_type=state.last_iter_type,  # type: ignore[arg-type]
         corpus_size=corpus.size(),
-        trending_pool_size=0,  # populated by R-04
-        last_r2=None,  # populated by R-03
+        trending_pool_size=curator_mod.count_trending_entries(),
+        last_r2=predictor.r2,
     )

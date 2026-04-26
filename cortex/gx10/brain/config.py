@@ -87,3 +87,11 @@ CURATOR_QUERY_EXPANSION_MIN_RATE = 0.10
 # Subprocess timeouts for yt-dlp (seconds).
 CURATOR_YTSEARCH_TIMEOUT_S = 60
 CURATOR_DOWNLOAD_TIMEOUT_S = 300
+
+# R-04: trending pool (PRD §11.8). Date-partitioned at cache/trending/<yyyy-mm-dd>/
+# with TTL-based cleanup at the start of each trending iteration.
+CURATOR_TRENDING_DIR = CACHE_DIR / "trending"
+CURATOR_TRENDING_TTL_DAYS = 7
+# Trending iteration tries fewer URLs per call than corpus iteration — the pool
+# refreshes every 6 iterations and we want quality over quantity.
+CURATOR_TRENDING_URLS_PER_ITERATION = 5

@@ -213,6 +213,7 @@ def test_curator_status_endpoint_shape(client):
 
 import json as _json  # noqa: E402
 import shutil as _shutil  # noqa: E402
+from datetime import datetime, timedelta, timezone  # noqa: E402
 
 import numpy as _np  # noqa: E402
 
@@ -470,3 +471,132 @@ def test_fit_predictor_skips_excluded_rows(tmp_path):
     out = _fit(corpus_path=corpus_path, out_path=out_path, model="ridge")
     assert out["n_rows"] == 12  # 15 − 3 excluded
     assert out_path.exists()
+
+
+# ---------- R-04 trending iteration (PRD §11.8) ----------
+
+
+@pytest.fixture
+def trending_iteration_env(monkeypatch, tmp_path):
+    """Env for testing real trending iterations: temp cache dir, stubbed yt-dlp,
+    stubbed TRIBE, stubbed Whisper + nomic embed, real curator + ingest."""
+    cache_dir = tmp_path / "cache"
+    cache_dir.mkdir()
+    trending_dir = cache_dir / "trending"
+    monkeypatch.setattr(config, "CACHE_DIR", cache_dir)
+    monkeypatch.setattr(config, "CURATOR_LOG_FILE", cache_dir / "curator_log.jsonl")
+    monkeypatch.setattr(config, "CURATOR_QUERY_POOL_FILE", cache_dir / "curator_query_pool.jsonl")
+    monkeypatch.setattr(config, "CURATOR_TRENDING_DIR", trending_dir)
+    monkeypatch.setattr(config, "CURATOR_TRENDING_URLS_PER_ITERATION", 3)
+
+    async def _stub_ytsearch(query):
+        return [_make_meta(f"trend_{abs(hash(query + str(i))) % 100000:05d}") for i in range(4)]
+    monkeypatch.setattr(curator_mod, "_ytsearch_metadata", _stub_ytsearch)
+
+    async def _stub_download(url, out_dir):
+        fake = out_dir / f"{abs(hash(url)) % 100000:05d}.mp4"
+        fake.write_bytes(b"fake mp4")
+        return fake
+    monkeypatch.setattr(curator_mod, "_ytdlp_download", _stub_download)
+    yield trending_dir
+
+
+@pytest.mark.asyncio
+async def test_run_trending_iteration_writes_date_partitioned_entries(trending_iteration_env):
+    trending_dir = trending_iteration_env
+    await curator_mod._run_trending_iteration(5, active_streams_fn=lambda: 0)
+
+    # Today's partition exists with N entries matching CURATOR_TRENDING_URLS_PER_ITERATION.
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    today_dir = trending_dir / today
+    assert today_dir.exists(), "today's partition should be created"
+    entries = list(today_dir.glob("*.json"))
+    assert 0 < len(entries) <= config.CURATOR_TRENDING_URLS_PER_ITERATION
+
+    # Each entry must have the LibraryEntry-shape fields PLUS trending-specific extras.
+    blob = _json.loads(entries[0].read_text())
+    for key in (
+        "video_id", "uploaded_at", "duration_s",
+        "tribe_pooled", "roi_means", "transcript", "text_embedding", "thumbnail_url",
+        "source_url", "creator_handle", "view_count", "engagement_rate",
+    ):
+        assert key in blob, f"trending entry missing key: {key}"
+    assert blob["video_id"].startswith("yt:")
+    assert blob["thumbnail_url"].startswith("https://i.ytimg.com/vi/")
+
+
+@pytest.mark.asyncio
+async def test_run_trending_iteration_yields_when_active_stream(trending_iteration_env):
+    trending_dir = trending_iteration_env
+    await curator_mod._run_trending_iteration(5, active_streams_fn=lambda: 1)
+
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    today_dir = trending_dir / today
+    # The dir is created (so the entry write would succeed) but no entries land.
+    if today_dir.exists():
+        assert list(today_dir.glob("*.json")) == []
+
+
+@pytest.mark.asyncio
+async def test_run_trending_iteration_dedupes_across_dates(trending_iteration_env, monkeypatch):
+    """A trending video already in yesterday's partition should not be re-processed today."""
+    trending_dir = trending_iteration_env
+    yesterday = (datetime.now(timezone.utc) - timedelta(days=1)).strftime("%Y-%m-%d")
+    yest_dir = trending_dir / yesterday
+    yest_dir.mkdir(parents=True)
+    # Pre-seed yesterday with a fixed id; then make ytsearch only return that id.
+    fixed_id = "trend_already_seen"
+    (yest_dir / f"{fixed_id}.json").write_text(_json.dumps({"video_id": f"yt:{fixed_id}"}))
+
+    async def _ytsearch_returns_seen(query):
+        return [_make_meta(fixed_id)]
+    monkeypatch.setattr(curator_mod, "_ytsearch_metadata", _ytsearch_returns_seen)
+
+    await curator_mod._run_trending_iteration(5, active_streams_fn=lambda: 0)
+
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    today_dir = trending_dir / today
+    if today_dir.exists():
+        assert list(today_dir.glob("*.json")) == [], "must not re-process video already in pool"
+
+
+def test_prune_old_trending_dirs_deletes_only_expired(tmp_path, monkeypatch):
+    trending_dir = tmp_path / "trending"
+    trending_dir.mkdir()
+    monkeypatch.setattr(config, "CURATOR_TRENDING_DIR", trending_dir)
+    monkeypatch.setattr(config, "CURATOR_TRENDING_TTL_DAYS", 7)
+
+    today = datetime.now(timezone.utc)
+    fresh = (today - timedelta(days=2)).strftime("%Y-%m-%d")
+    stale = (today - timedelta(days=10)).strftime("%Y-%m-%d")
+    bogus = "not-a-date"
+    for name in (fresh, stale, bogus):
+        d = trending_dir / name
+        d.mkdir()
+        (d / "x.json").write_text("{}")
+
+    pruned = curator_mod._prune_old_trending_dirs()
+    assert pruned == 1
+    assert (trending_dir / fresh).exists(), "recent partition must be kept"
+    assert not (trending_dir / stale).exists(), "stale partition must be deleted"
+    assert (trending_dir / bogus).exists(), "malformed dir name must be skipped (not deleted)"
+
+
+def test_count_trending_entries_walks_all_partitions(tmp_path, monkeypatch):
+    trending_dir = tmp_path / "trending"
+    trending_dir.mkdir()
+    monkeypatch.setattr(config, "CURATOR_TRENDING_DIR", trending_dir)
+    assert curator_mod.count_trending_entries() == 0
+
+    for date_name, n in [("2026-04-23", 3), ("2026-04-24", 5), ("2026-04-25", 2)]:
+        d = trending_dir / date_name
+        d.mkdir()
+        for i in range(n):
+            (d / f"vid_{i}.json").write_text("{}")
+    assert curator_mod.count_trending_entries() == 10
+
+
+def test_compute_engagement_rate_handles_zero_views():
+    assert curator_mod._compute_engagement_rate({"view_count": 0, "like_count": 100}) == 0.0
+    assert curator_mod._compute_engagement_rate({"view_count": 1000, "like_count": 80, "comment_count": 20}) == pytest.approx(0.10)
+    assert curator_mod._compute_engagement_rate({}) == 0.0

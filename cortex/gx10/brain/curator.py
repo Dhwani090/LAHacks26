@@ -16,7 +16,7 @@ import shutil
 import sys
 import tempfile
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable
 
@@ -126,9 +126,7 @@ async def _run_iteration(
     if iter_type == "corpus":
         await _run_corpus_iteration(iter_count, active_streams_fn)
     else:
-        # R-04 hand-off — same yt-dlp+TRIBE pipeline, different terminal step.
-        # For R-03 we log and skip so Phase R is unblockable on the corpus path.
-        logger.info("curator: iter=%d trending iteration deferred to R-04", iter_count)
+        await _run_trending_iteration(iter_count, active_streams_fn)
 
 
 async def _run_corpus_iteration(
@@ -575,6 +573,209 @@ def _append_query_pool(queries: list[str], source_video_ids: list[str]) -> None:
     if len(rows) > config.CURATOR_QUERY_POOL_MAX_SIZE:
         rows = rows[-config.CURATOR_QUERY_POOL_MAX_SIZE:]
     path.write_text("\n".join(rows) + "\n", encoding="utf-8")
+
+
+# ---------------------------------------------------------------------------
+# Trending iteration (PRD §11.8) — same yt-dlp+TRIBE pipeline as corpus,
+# different terminal step: writes LibraryEntry-shaped JSON to
+# cache/trending/<yyyy-mm-dd>/<video_id>.json. R-05's /inspiration endpoint
+# reads from this pool to rank against creator centroids.
+# ---------------------------------------------------------------------------
+
+
+async def _run_trending_iteration(
+    iter_count: int,
+    active_streams_fn: Callable[[], int],
+) -> None:
+    from . import curator_gap
+    from .corpus import corpus
+    from .gemma import gemma_service
+    from .pooling import frames_to_array, pool_tribe_output, roi_mean_vector
+    from .predictor import predictor
+    from .text_embed import embed_text
+    from .transcribe import transcribe
+    from .tribe import tribe_service
+
+    iter_log: dict[str, Any] = {
+        "ts": _now_iso(),
+        "iter": iter_count,
+        "type": "trending",
+        "queries": [],
+        "n_added": 0,
+        "n_pruned": 0,
+    }
+
+    # Cleanup expired date partitions (PRD §11.8 7-day TTL).
+    iter_log["n_pruned"] = _prune_old_trending_dirs()
+
+    queries = curator_gap.pick_queries(
+        iter_type="trending",
+        corpus=corpus,
+        predictor=predictor,
+        gemma=gemma_service,
+        query_pool_path=config.CURATOR_QUERY_POOL_FILE,
+    )
+    iter_log["queries"] = queries
+    logger.info("curator: iter=%d trending queries=%s", iter_count, queries)
+
+    # Dedupe across the entire trending pool — re-running the same trending
+    # search next iteration shouldn't re-process clips already in the pool.
+    existing_ids = _read_trending_video_ids()
+
+    candidates: list[dict[str, Any]] = []
+    for q in queries:
+        try:
+            metas = await _ytsearch_metadata(q)
+        except Exception as exc:
+            logger.error("curator: trending ytsearch failed for %r: %s", q, exc)
+            continue
+        for meta in _filter_search_results(metas, existing_ids):
+            if meta["id"] in {c["id"] for c in candidates}:
+                continue
+            candidates.append(meta)
+            if len(candidates) >= config.CURATOR_TRENDING_URLS_PER_ITERATION:
+                break
+        if len(candidates) >= config.CURATOR_TRENDING_URLS_PER_ITERATION:
+            break
+
+    today_dir = config.CURATOR_TRENDING_DIR / datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    today_dir.mkdir(parents=True, exist_ok=True)
+
+    n_added = 0
+    with tempfile.TemporaryDirectory(prefix="cortex_trending_") as tmp:
+        tmp_dir = Path(tmp)
+        for meta in candidates:
+            if active_streams_fn() > 0:
+                logger.info("curator: iter=%d trending — yielding to active streams", iter_count)
+                break
+            try:
+                entry = await _process_trending_candidate(
+                    meta, tmp_dir, tribe_service,
+                    frames_to_array, pool_tribe_output, roi_mean_vector,
+                    transcribe, embed_text,
+                )
+            except Exception as exc:
+                logger.error("curator: per-URL trending failed for %s: %s", meta.get("id"), exc)
+                continue
+            if entry is None:
+                continue
+            _write_trending_entry(today_dir, entry)
+            n_added += 1
+
+    iter_log["n_added"] = n_added
+    _append_log_row(iter_log)
+
+
+async def _process_trending_candidate(
+    meta: dict[str, Any],
+    tmp_dir: Path,
+    tribe_service: Any,
+    frames_to_array: Callable[..., Any],
+    pool_tribe_output: Callable[..., Any],
+    roi_mean_vector: Callable[..., Any],
+    transcribe_fn: Callable[..., str],
+    embed_fn: Callable[..., Any],
+) -> dict[str, Any] | None:
+    """Download → TRIBE (locked) → Whisper → nomic embed → trending dict."""
+    url = meta.get("webpage_url") or meta.get("original_url") or f"https://youtube.com/shorts/{meta.get('id')}"
+    video_path: Path | None = None
+    try:
+        video_path = await _ytdlp_download(url, tmp_dir)
+        async with tribe_service.lock:
+            result = await asyncio.to_thread(tribe_service.analyze_video, video_path)
+        arr = frames_to_array(result["brain_frames"])
+        pooled = pool_tribe_output(arr)
+        rois = roi_mean_vector(arr)
+        transcript = await asyncio.to_thread(transcribe_fn, video_path)
+        text_emb = await asyncio.to_thread(embed_fn, transcript or "")
+        duration_s = float(result.get("duration_s") or arr.shape[0])
+
+        vid = str(meta.get("id"))
+        return {
+            "video_id": f"yt:{vid}",
+            "uploaded_at": _now_iso(),
+            "duration_s": duration_s,
+            "tribe_pooled": np.asarray(pooled, dtype=np.float32).tolist(),
+            "roi_means": np.asarray(rois, dtype=np.float32).tolist(),
+            "transcript": transcript or "",
+            "text_embedding": np.asarray(text_emb, dtype=np.float32).tolist(),
+            "thumbnail_url": f"https://i.ytimg.com/vi/{vid}/hqdefault.jpg",
+            # Trending-specific fields R-05's /inspiration response needs.
+            "source_url": meta.get("webpage_url"),
+            "creator_handle": meta.get("uploader") or meta.get("channel"),
+            "view_count": int(meta.get("view_count") or 0),
+            "engagement_rate": _compute_engagement_rate(meta),
+        }
+    finally:
+        if video_path is not None and video_path.exists():
+            try:
+                video_path.unlink()
+            except OSError:
+                pass
+
+
+def _compute_engagement_rate(meta: dict[str, Any]) -> float:
+    """(likes + comments) / views — standard creator-side engagement formula."""
+    views = float(meta.get("view_count") or 0)
+    if views <= 0:
+        return 0.0
+    likes = float(meta.get("like_count") or 0)
+    comments = float(meta.get("comment_count") or 0)
+    return (likes + comments) / views
+
+
+def _read_trending_video_ids() -> set[str]:
+    """Walk all date subdirs of CURATOR_TRENDING_DIR, return all seen video_ids
+    in `yt:<id>` format (matching _filter_search_results' dedupe key)."""
+    out: set[str] = set()
+    if not config.CURATOR_TRENDING_DIR.exists():
+        return out
+    for date_dir in config.CURATOR_TRENDING_DIR.iterdir():
+        if not date_dir.is_dir():
+            continue
+        for json_path in date_dir.glob("*.json"):
+            out.add(f"yt:{json_path.stem}")
+    return out
+
+
+def _prune_old_trending_dirs() -> int:
+    """Delete cache/trending/<date>/ folders older than CURATOR_TRENDING_TTL_DAYS.
+    Returns count of pruned date partitions. Malformed dir names are skipped
+    (not deleted — better safe than sorry on filesystem ops)."""
+    if not config.CURATOR_TRENDING_DIR.exists():
+        return 0
+    cutoff = datetime.now(timezone.utc) - timedelta(days=config.CURATOR_TRENDING_TTL_DAYS)
+    pruned = 0
+    for date_dir in config.CURATOR_TRENDING_DIR.iterdir():
+        if not date_dir.is_dir():
+            continue
+        try:
+            d = datetime.strptime(date_dir.name, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+        except ValueError:
+            continue
+        if d < cutoff:
+            shutil.rmtree(date_dir, ignore_errors=True)
+            pruned += 1
+            logger.info("curator: pruned old trending dir %s", date_dir.name)
+    return pruned
+
+
+def _write_trending_entry(date_dir: Path, entry: dict[str, Any]) -> None:
+    """Write entry to <date_dir>/<video_id_without_yt_prefix>.json.
+
+    Strips the `yt:` prefix from the filename so paths stay POSIX-friendly;
+    the in-file `video_id` field keeps the prefix for downstream reads."""
+    vid = entry["video_id"]
+    safe = vid.split(":", 1)[1] if ":" in vid else vid
+    path = date_dir / f"{safe}.json"
+    path.write_text(json.dumps(entry), encoding="utf-8")
+
+
+def count_trending_entries() -> int:
+    """Public helper — used by /curator/status to report trending_pool_size."""
+    if not config.CURATOR_TRENDING_DIR.exists():
+        return 0
+    return sum(1 for _ in config.CURATOR_TRENDING_DIR.glob("*/*.json"))
 
 
 # ---------------------------------------------------------------------------
