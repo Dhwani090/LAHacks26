@@ -35,3 +35,4 @@ Thumbs.db
 .env.local
 .env.*.local
 .gstack/
+cortex/gx10/.qa/
