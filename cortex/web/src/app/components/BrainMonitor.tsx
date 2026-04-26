@@ -27,6 +27,7 @@ export function BrainMonitor() {
   const playStartMsRef = useRef<number | null>(null);
   const tickTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const [meanActivation, setMeanActivation] = useState(0);
+  const [initError, setInitError] = useState<string | null>(null);
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -43,12 +44,25 @@ export function BrainMonitor() {
     let cancelled = false;
 
     (async () => {
-      await nv.attachToCanvas(canvas);
+      try {
+        await nv.attachToCanvas(canvas);
+      } catch (err) {
+        // Niivue throws synchronously inside attachToCanvas when WebGL2 isn't
+        // available (headless browsers, ancient hardware, GPU blocklist).
+        // Surface a soft fallback instead of letting an unhandled promise
+        // rejection crash the page — the rest of the app works without the
+        // brain visualization.
+        const msg = err instanceof Error ? err.message : String(err);
+        console.error('[BrainMonitor] WebGL2 init failed', err);
+        if (!cancelled) setInitError(msg);
+        return;
+      }
       if (cancelled) return;
       try {
         await nv.loadMeshes(MESH_URLS.map((url) => ({ url })));
       } catch (err) {
         console.error('[BrainMonitor] mesh load failed', err);
+        if (!cancelled) setInitError(err instanceof Error ? err.message : 'mesh load failed');
         return;
       }
       if (cancelled || !nvRef.current) return;
@@ -191,6 +205,19 @@ export function BrainMonitor() {
         className="h-full w-full"
         data-testid="brain-monitor-canvas"
       />
+      {initError && (
+        <div className="pointer-events-none absolute inset-0 flex flex-col items-center justify-center px-8 text-center">
+          <div className="text-[10px] uppercase tracking-[0.28em] text-white/45">
+            brain visualization unavailable
+          </div>
+          <div className="mt-2 text-xs text-white/55">
+            WebGL2 not supported in this browser.
+          </div>
+          <div className="mt-1 text-[10px] text-white/30">
+            Analysis still works — try Chrome, Edge, or a recent Firefox to see the brain.
+          </div>
+        </div>
+      )}
     </div>
   );
 }
