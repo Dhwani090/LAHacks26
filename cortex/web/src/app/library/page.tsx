@@ -60,6 +60,10 @@ export default function LibraryPage() {
   const [entries, setEntries] = useState<LibraryEntryMeta[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  // Track per-row delete state so we can disable the button + show "removing…"
+  // without a global spinner (the table can have 100+ rows).
+  const [deleting, setDeleting] = useState<Set<string>>(new Set());
+  const [pendingDelete, setPendingDelete] = useState<LibraryEntryMeta | null>(null);
 
   const refresh = useCallback(async () => {
     setError(null);
@@ -80,6 +84,27 @@ export default function LibraryPage() {
   useEffect(() => {
     refresh();
   }, [refresh]);
+
+  async function handleConfirmDelete(entry: LibraryEntryMeta) {
+    setDeleting((prev) => new Set(prev).add(entry.video_id));
+    // Optimistic remove — if the request fails we'll refetch on error.
+    setEntries((prev) => prev.filter((e) => e.video_id !== entry.video_id));
+    setPendingDelete(null);
+    try {
+      await brainClient.deleteLibraryEntry(DEMO_CREATOR_ID, entry.video_id);
+    } catch (err) {
+      console.error('[/library] delete failed', err);
+      setError(err instanceof Error ? err.message : 'delete failed');
+      // Restore real state — the optimistic removal might have been wrong.
+      void refresh();
+    } finally {
+      setDeleting((prev) => {
+        const next = new Set(prev);
+        next.delete(entry.video_id);
+        return next;
+      });
+    }
+  }
 
   const need = Math.max(0, TUNING.SIMILARITY_MIN_LIBRARY_SIZE - entries.length);
   const ready = need === 0;
@@ -126,26 +151,97 @@ export default function LibraryPage() {
                   <th className="px-4 py-2 font-medium">Video ID</th>
                   <th className="px-4 py-2 font-medium">Length</th>
                   <th className="px-4 py-2 font-medium">Uploaded</th>
+                  <th className="w-10 px-2 py-2 font-medium text-right" aria-label="actions" />
                 </tr>
               </thead>
               <tbody className="divide-y divide-white/5">
-                {entries.map((e) => (
-                  <tr key={e.video_id} className="hover:bg-white/[0.03]">
-                    <td className="px-4 py-3 font-mono text-xs text-white/85">{e.video_id}</td>
-                    <td className="px-4 py-3 tabular-nums text-white/65">
-                      {formatDuration(e.duration_s)}
-                    </td>
-                    <td className="px-4 py-3 text-white/65">
-                      <div className="text-white/85">{relativeTime(e.uploaded_at)}</div>
-                      <div className="text-[10px] text-white/40">{formatTimestamp(e.uploaded_at)}</div>
-                    </td>
-                  </tr>
-                ))}
+                {entries.map((e) => {
+                  const isDeleting = deleting.has(e.video_id);
+                  return (
+                    <tr key={e.video_id} className="group hover:bg-white/[0.03]">
+                      <td className="px-4 py-3 font-mono text-xs text-white/85">{e.video_id}</td>
+                      <td className="px-4 py-3 tabular-nums text-white/65">
+                        {formatDuration(e.duration_s)}
+                      </td>
+                      <td className="px-4 py-3 text-white/65">
+                        <div className="text-white/85">{relativeTime(e.uploaded_at)}</div>
+                        <div className="text-[10px] text-white/40">{formatTimestamp(e.uploaded_at)}</div>
+                      </td>
+                      <td className="w-10 px-2 py-3 text-right">
+                        <button
+                          type="button"
+                          onClick={() => setPendingDelete(e)}
+                          disabled={isDeleting}
+                          aria-label={`delete ${e.video_id}`}
+                          title="remove from library"
+                          className="rounded-full border border-transparent px-2 py-0.5 text-base leading-none text-white/30 transition-colors hover:border-red-400/40 hover:bg-red-400/10 hover:text-red-300 disabled:cursor-not-allowed disabled:opacity-40"
+                        >
+                          {isDeleting ? '…' : '×'}
+                        </button>
+                      </td>
+                    </tr>
+                  );
+                })}
               </tbody>
             </table>
           </div>
         )}
+
+        {pendingDelete && (
+          <DeleteConfirm
+            entry={pendingDelete}
+            onCancel={() => setPendingDelete(null)}
+            onConfirm={() => handleConfirmDelete(pendingDelete)}
+          />
+        )}
       </div>
     </AppShell>
+  );
+}
+
+function DeleteConfirm({
+  entry,
+  onCancel,
+  onConfirm,
+}: {
+  entry: LibraryEntryMeta;
+  onCancel: () => void;
+  onConfirm: () => void;
+}) {
+  return (
+    <div
+      className="fixed inset-0 z-40 flex items-center justify-center bg-black/60 backdrop-blur-sm"
+      onClick={onCancel}
+    >
+      <div
+        onClick={(e) => e.stopPropagation()}
+        className="flex w-full max-w-sm flex-col gap-4 rounded-lg border border-white/10 bg-zinc-950 p-6 text-white/85"
+      >
+        <div className="text-xs uppercase tracking-[0.22em] text-white/50">remove from library?</div>
+        <div className="flex flex-col gap-1">
+          <div className="font-mono text-sm text-white/85">{entry.video_id}</div>
+          <div className="text-xs text-white/45">
+            Brain features + transcript will be deleted. This won&apos;t affect any
+            past similarity searches you&apos;ve already viewed.
+          </div>
+        </div>
+        <div className="flex justify-end gap-2">
+          <button
+            type="button"
+            onClick={onCancel}
+            className="rounded-full border border-white/15 px-4 py-1.5 text-[11px] uppercase tracking-[0.2em] text-white/60 hover:bg-white/5"
+          >
+            cancel
+          </button>
+          <button
+            type="button"
+            onClick={onConfirm}
+            className="rounded-full border border-red-400/50 bg-red-400/10 px-4 py-1.5 text-[11px] uppercase tracking-[0.2em] text-red-300 hover:bg-red-400/20"
+          >
+            remove
+          </button>
+        </div>
+      </div>
+    </div>
   );
 }

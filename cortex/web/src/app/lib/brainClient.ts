@@ -156,12 +156,34 @@ export const brainClient = {
     return (await res.json()) as LibraryListResponse;
   },
 
+  async deleteLibraryEntry(
+    creatorId: string,
+    videoId: string,
+    signal?: AbortSignal,
+  ): Promise<{ creator_id: string; video_id: string; library_size: number }> {
+    const res = await fetch(
+      url(`/library/${encodeURIComponent(creatorId)}/${encodeURIComponent(videoId)}`),
+      { method: 'DELETE', signal },
+    );
+    if (!res.ok) throw new BrainClientError(`/library/${creatorId}/${videoId} → ${res.status}`);
+    return (await res.json()) as { creator_id: string; video_id: string; library_size: number };
+  },
+
   predictSimilarity(
     jobId: string,
     creatorId: string,
+    opts?: { lastN?: number | null; sinceDays?: number | null },
     signal?: AbortSignal,
   ): Promise<SimilarityResponse> {
-    return postJson<SimilarityResponse>('/similarity', { job_id: jobId, creator_id: creatorId }, signal);
+    const body: {
+      job_id: string;
+      creator_id: string;
+      last_n?: number | null;
+      since_days?: number | null;
+    } = { job_id: jobId, creator_id: creatorId };
+    if (opts?.lastN !== undefined) body.last_n = opts.lastN;
+    if (opts?.sinceDays !== undefined) body.since_days = opts.sinceDays;
+    return postJson<SimilarityResponse>('/similarity', body, signal);
   },
 
   resolveCacheUrl(pathOrUrl: string): string {

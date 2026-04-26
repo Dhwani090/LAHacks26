@@ -87,6 +87,17 @@ class ApplySuggestionResponse(BaseModel):
 class SimilarityRequest(BaseModel):
     job_id: str
     creator_id: str = Field(..., min_length=1, max_length=64)
+    # Candidate-set filters (PRD §11.6 — creator-tunable similarity search).
+    # Default last_n=50 keeps comparison anchored to the creator's recent
+    # voice; older work is often a different style and dilutes the signal.
+    # last_n     = compare only against the N most recently uploaded entries.
+    #              None or 0 means "no cap" (use whole library, subject to
+    #              since_days if also set).
+    # since_days = only consider entries uploaded within the last N days.
+    #              None means "no time filter".
+    # If both are set, since_days filters first, then last_n caps.
+    last_n: int | None = Field(default=50, ge=0, le=100_000)
+    since_days: int | None = Field(default=None, ge=1, le=3650)
 
 
 class RoiBreakdown(BaseModel):
@@ -109,8 +120,16 @@ class SimilarityMatch(BaseModel):
 class SimilarityResponse(BaseModel):
     matches: list[SimilarityMatch]
     library_size: int
+    # candidate_size = number of entries that survived the user's filter
+    # (last_n / since_days) and were actually ranked. Frontend uses this in
+    # the "ranked vs. N past clips" caption so the count reflects the window,
+    # not the full library.
+    candidate_size: int = 0
     creator_id: str
     weighting: dict[str, float] | None = None
+    # Echo of the filter the request used, so the UI can keep the dropdown
+    # state honest after the round-trip (e.g. clamp to library size).
+    filter: dict[str, int | None] | None = None
     message: str | None = None
 
 

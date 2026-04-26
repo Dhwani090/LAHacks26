@@ -22,7 +22,7 @@ from . import config, models, streaming
 from .cache import hero_cache
 from .corpus import corpus
 from .gemma import gemma_service
-from .library import LibraryEntry, library_registry, now_iso, rank_similar
+from .library import LibraryEntry, filter_candidates, library_registry, now_iso, rank_similar
 from .pooling import frames_to_array, pool_tribe_output, roi_mean_vector
 from .predictor import load_default_predictor, predictor
 from .text_embed import embed_text
@@ -389,6 +389,27 @@ async def library_from_job(req: models.LibraryFromJobRequest) -> models.LibraryU
     )
 
 
+@app.delete("/library/{creator_id}/{video_id}")
+async def library_delete(creator_id: str, video_id: str) -> dict[str, Any]:
+    """Remove one entry from the creator's library. Idempotent — calling it
+    on an unknown video_id returns 404 so the UI can surface "already gone."
+    Use case: creator added duplicates or a wrong file and wants to clean up
+    before running similarity search."""
+    if not creator_id.strip():
+        raise HTTPException(status_code=400, detail="creator_id required")
+    try:
+        existed = library_registry.delete_entry(creator_id, video_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    if not existed:
+        raise HTTPException(status_code=404, detail="library entry not found")
+    return {
+        "creator_id": creator_id,
+        "video_id": video_id,
+        "library_size": library_registry.size(creator_id),
+    }
+
+
 @app.get("/library/{creator_id}", response_model=models.LibraryListResponse)
 async def library_list(creator_id: str) -> models.LibraryListResponse:
     entries = library_registry.load_creator_library(creator_id)
@@ -426,8 +447,26 @@ async def similarity(req: models.SimilarityRequest) -> models.SimilarityResponse
         return models.SimilarityResponse(
             matches=[],
             library_size=len(library),
+            candidate_size=0,
             creator_id=req.creator_id,
             message=f"upload at least {config.SIMILARITY_MIN_LIBRARY_SIZE} past clips to enable originality search",
+        )
+
+    candidates = filter_candidates(
+        library,
+        last_n=req.last_n,
+        since_days=req.since_days,
+    )
+    if len(candidates) < config.SIMILARITY_MIN_LIBRARY_SIZE:
+        # Filter narrowed the set below the cold-start threshold — tell the
+        # creator instead of returning a noisy ranking over 1-2 clips.
+        return models.SimilarityResponse(
+            matches=[],
+            library_size=len(library),
+            candidate_size=len(candidates),
+            creator_id=req.creator_id,
+            filter={"last_n": req.last_n, "since_days": req.since_days},
+            message=f"only {len(candidates)} clip(s) match your filter — widen the window or upload more",
         )
 
     text_emb = job.get("text_embedding")
@@ -441,7 +480,7 @@ async def similarity(req: models.SimilarityRequest) -> models.SimilarityResponse
         draft_brain=np.asarray(pooled, dtype=np.float32),
         draft_text=draft_text,
         draft_roi_means=np.asarray(roi_means, dtype=np.float32),
-        library=library,
+        library=candidates,
     )
     return models.SimilarityResponse(
         matches=[
@@ -458,6 +497,8 @@ async def similarity(req: models.SimilarityRequest) -> models.SimilarityResponse
             for m in matches
         ],
         library_size=len(library),
+        candidate_size=len(candidates),
         creator_id=req.creator_id,
         weighting={"brain": config.SIMILARITY_BRAIN_WEIGHT, "text": config.SIMILARITY_TEXT_WEIGHT},
+        filter={"last_n": req.last_n, "since_days": req.since_days},
     )
