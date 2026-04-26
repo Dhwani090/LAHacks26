@@ -49,7 +49,13 @@ class TribeService:
             return
         try:
             from cortexlab.inference.predictor import TribeModel  # type: ignore
-            self._model = TribeModel.from_pretrained(config.TRIBE_MODEL_ID, device="auto")
+            # data.frequency=1.0 halves inference time vs the checkpoint default
+            # of 2Hz and aligns model output with config.TRIBE_FRAME_RATE_HZ.
+            self._model = TribeModel.from_pretrained(
+                config.TRIBE_MODEL_ID,
+                device="auto",
+                config_update={"data.frequency": 1.0},
+            )
             self._loaded = True
             logger.info("TRIBE loaded (%s)", config.TRIBE_MODEL_ID)
         except Exception as exc:
@@ -206,12 +212,25 @@ class TribeService:
 
     @staticmethod
     def _cold_zones(curve: np.ndarray) -> list[dict[str, Any]]:
-        """Runs of language-curve z < threshold lasting ≥ COLD_MIN_DURATION_S."""
-        below = curve < config.COLD_THRESHOLD_Z
-        T = len(below)
+        """Runs where the language curve sits in its bottom quartile.
+
+        The absolute z-threshold (`COLD_THRESHOLD_Z`) was too strict in practice —
+        TRIBE's per-clip variance is small (~0.05 std) so an absolute cut never
+        triggered. Using the clip's own 25th percentile guarantees we surface the
+        weakest moments of *this* clip, which is what a creator actually wants.
+        """
+        T = len(curve)
+        if T == 0:
+            return []
+        sample_period = 1.0 / config.TRIBE_FRAME_RATE_HZ
+        threshold = float(np.percentile(curve, 25))
+        absolute_floor = float(config.COLD_THRESHOLD_Z)
+        cutoff = max(threshold, absolute_floor) if threshold < 0 else threshold
+        below = curve < cutoff
         out: list[dict[str, Any]] = []
         i = 0
-        sample_period = 1.0 / config.TRIBE_FRAME_RATE_HZ
+        # Slightly relaxed minimum — at 1Hz, 2 consecutive frames is a real dip.
+        min_frames = max(2, int(round(config.COLD_MIN_DURATION_S * config.TRIBE_FRAME_RATE_HZ)))
         while i < T:
             if not below[i]:
                 i += 1
@@ -219,8 +238,7 @@ class TribeService:
             j = i
             while j < T and below[j]:
                 j += 1
-            duration_s = (j - i) * sample_period
-            if duration_s >= config.COLD_MIN_DURATION_S:
+            if (j - i) >= min_frames:
                 out.append({
                     "start": float(i * sample_period),
                     "end": float(j * sample_period),

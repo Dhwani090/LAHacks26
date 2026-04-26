@@ -29,14 +29,32 @@ const VIEW_W = 1000;
 const TRACK_H = 40;
 const TRACK_GAP = 6;
 
+// Per-track auto-scale: TRIBE returns z-scores with very small per-clip variance
+// (~0.05 std), so a fixed [-1.5, 1.5] window made every line look flat. We scale
+// to the curve's own range with a small floor so noise on a near-constant track
+// doesn't get amplified into fake drama.
+function scaleBounds(values: number[]): { lo: number; hi: number } {
+  let lo = Infinity;
+  let hi = -Infinity;
+  for (const v of values) {
+    if (v < lo) lo = v;
+    if (v > hi) hi = v;
+  }
+  if (!Number.isFinite(lo) || !Number.isFinite(hi)) return { lo: -1, hi: 1 };
+  const span = hi - lo;
+  const minSpan = 0.05;
+  if (span < minSpan) {
+    const mid = (lo + hi) / 2;
+    return { lo: mid - minSpan / 2, hi: mid + minSpan / 2 };
+  }
+  const pad = span * 0.1;
+  return { lo: lo - pad, hi: hi + pad };
+}
+
 function buildPath(values: number[], w: number, h: number): string {
   if (!values.length) return '';
-  const minY = -1.5;
-  const maxY = 1.5;
-  const yScale = (v: number) => {
-    const clamped = Math.min(maxY, Math.max(minY, v));
-    return h - ((clamped - minY) / (maxY - minY)) * h;
-  };
+  const { lo, hi } = scaleBounds(values);
+  const yScale = (v: number) => h - ((v - lo) / (hi - lo)) * h;
   const xStep = w / Math.max(1, values.length - 1);
   let d = `M0 ${yScale(values[0]).toFixed(2)}`;
   for (let i = 1; i < values.length; i++) {

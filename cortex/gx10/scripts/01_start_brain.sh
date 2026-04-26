@@ -76,6 +76,12 @@ else
     echo "  Run: bash scripts/00_one_time_setup.sh" >&2
     exit 1
   fi
+  NEURALSET_VIDEO_PY="$(python -c 'import neuralset.extractors.video as m; print(m.__file__)')"
+  if ! grep -q "PATCHED for cortex/LAHacks26 vjepa2-bf16" "$NEURALSET_VIDEO_PY"; then
+    echo "ERROR: neuralset vjepa2-bf16 patch missing." >&2
+    echo "  Run: bash scripts/00_one_time_setup.sh" >&2
+    exit 1
+  fi
 fi
 if ! python -c "import transformers" 2>/dev/null; then
   if [[ "${CORTEX_STUB_GEMMA:-}" != "1" ]]; then

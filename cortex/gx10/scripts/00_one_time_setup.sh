@@ -59,6 +59,60 @@ print("[setup]   patched")
 PY
 fi
 
+# 2b. neuralset video extractor — bf16 vjepa2 ----------------------------
+# vjepa2-vitg is the dominant cost in video analysis (~6.5s/chunk fp32 on Blackwell).
+# bf16 weights + bf16 pixel_values → 2-3x throughput on tensor cores.
+NEURALSET_VIDEO="$ENV/lib/python3.11/site-packages/neuralset/extractors/video.py"
+if [[ ! -f "$NEURALSET_VIDEO" ]]; then
+  echo "ERROR: $NEURALSET_VIDEO not found — is neuralset installed?" >&2
+  exit 1
+fi
+if grep -q "PATCHED for cortex/LAHacks26 vjepa2-bf16" "$NEURALSET_VIDEO"; then
+  echo "[setup] neuralset video.py already bf16-patched"
+else
+  echo "[setup] patching neuralset video.py for bf16 vjepa2"
+  "$ENV/bin/python" - "$NEURALSET_VIDEO" <<'PY'
+import sys, pathlib
+p = pathlib.Path(sys.argv[1])
+src = p.read_text()
+old1 = '        if "vjepa2" in model_name:\n            from transformers import AutoVideoProcessor as Processor\n\n        self.model = Model.from_pretrained(model_name, output_hidden_states=True, **extra)'
+new1 = (
+    '        if "vjepa2" in model_name:\n'
+    '            from transformers import AutoVideoProcessor as Processor\n'
+    '            # PATCHED for cortex/LAHacks26 vjepa2-bf16: vjepa2-vitg is ~1.8B params; fp32\n'
+    '            # encoding is the dominant cost (~6.5s/chunk on Blackwell). bf16 weights with\n'
+    '            # bf16 pixel_values give 2-3x throughput on tensor cores with no measurable\n'
+    '            # quality drop (per HF model card + LearnOpenCV real-time guide).\n'
+    '            extra["torch_dtype"] = torch.bfloat16\n\n'
+    '        self.model = Model.from_pretrained(model_name, output_hidden_states=True, **extra)'
+)
+old2 = '        kwargs[field] = list(images)\n        inputs = self.processor(**kwargs)\n        # prevent nans (happening for uniform images)\n        _fix_pixel_values(inputs)\n        inputs = inputs.to(self.model.device)\n        with torch.inference_mode():\n            pred = self.model(**inputs)\n        return pred'
+new2 = (
+    '        kwargs[field] = list(images)\n'
+    '        inputs = self.processor(**kwargs)\n'
+    '        # prevent nans (happening for uniform images)\n'
+    '        _fix_pixel_values(inputs)\n'
+    '        inputs = inputs.to(self.model.device)\n'
+    '        # PATCHED for cortex/LAHacks26 vjepa2-bf16: processor returns fp32 pixel_values;\n'
+    '        # cast to model dtype so tensor cores actually engage.\n'
+    '        target_dtype = next(self.model.parameters()).dtype\n'
+    '        if target_dtype != torch.float32:\n'
+    '            for k in ("pixel_values_videos", "pixel_values"):\n'
+    '                if k in inputs and inputs[k].dtype.is_floating_point and inputs[k].dtype != target_dtype:\n'
+    '                    inputs[k] = inputs[k].to(target_dtype)\n'
+    '        with torch.inference_mode():\n'
+    '            pred = self.model(**inputs)\n'
+    '        return pred'
+)
+for old, new in ((old1, new1), (old2, new2)):
+    if old not in src:
+        sys.exit(f"ERROR: expected pattern not found in video.py — neuralset version may have changed:\n{old[:80]}")
+    src = src.replace(old, new)
+p.write_text(src)
+print("[setup]   patched")
+PY
+fi
+
 # 3. uvx whisperx env: remove broken aarch64 CUDA torchcodec -------------
 if [[ ! -x "$UV" ]]; then
   echo "ERROR: uv not found at $UV — install with: curl -LsSf https://astral.sh/uv/install.sh | sh" >&2
