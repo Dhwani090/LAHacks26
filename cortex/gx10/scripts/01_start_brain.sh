@@ -8,6 +8,11 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
+# `uvx` is required by cortexlab.data.transforms for whisperx-based word alignment
+# (every text/audio/video TRIBE call). uv installer puts it in ~/.local/bin which
+# isn't on the default non-interactive bash PATH.
+export PATH="$HOME/.local/bin:$PATH"
+
 # ---------------------------------------------------------------------------
 # 1. HF token + downloads timeout (gated weights: LLaMA-3.2-3B + Gemma-2-2B).
 # ---------------------------------------------------------------------------
@@ -61,6 +66,15 @@ fi
 if ! python -c "import cortexlab" 2>/dev/null; then
   if [[ "${CORTEX_STUB_TRIBE:-}" != "1" ]]; then
     echo "warn: cortexlab not installed — set CORTEX_STUB_TRIBE=1 OR pip install cortexlab-toolkit" >&2
+  fi
+else
+  # Vendor-side patches that aren't expressible as pip requirements (see 00_one_time_setup.sh).
+  # Fail fast here so we don't crash 70s into TRIBE warmup on a fresh machine.
+  TRANSFORMS_PY="$(python -c 'import cortexlab.data.transforms as m; print(m.__file__)')"
+  if ! grep -q "PATCHED for cortex/LAHacks26" "$TRANSFORMS_PY"; then
+    echo "ERROR: cortexlab vendor patch missing." >&2
+    echo "  Run: bash scripts/00_one_time_setup.sh" >&2
+    exit 1
   fi
 fi
 if ! python -c "import transformers" 2>/dev/null; then
