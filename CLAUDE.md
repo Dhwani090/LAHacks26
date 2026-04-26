@@ -17,7 +17,7 @@ Full spec: `@docs/PRD.md`. Work queue: `@docs/TASKS.md`. Domain skills: `@.claud
 - iOS or Android app
 - User accounts, login, auth, OAuth
 - Multi-day project history or shareable links
-- Long-form content (>60s video, >60s audio, >500 words text)
+- Long-form content (>180s video, >180s audio, >500 words text). 180s covers YT Shorts max (3min), IG Reels max (90s), and most TikToks.
 - Auto-editing of video by cutting low-engagement spans — removed; the diagnostic is the product. (Auto-regeneration of new content — B-roll, voice synthesis, music swap — also out.)
 - Real-time live camera or microphone input
 - Cloud inference fallback if GX10 is down — local or nothing
@@ -131,6 +131,7 @@ Domain-specific patterns live here. Claude Code loads them only when invoked or 
 - `@.claude/skills/tribe-inference/SKILL.md` — calling `TribeModel`, gotchas, output shapes
 - `@.claude/skills/niivue-rendering/SKILL.md` — `niivue-react` patterns, mesh loading, vertex colors
 - `@.claude/skills/engagement-prediction/SKILL.md` — yt-dlp ingest, TRIBE feature pooling, ridge regression baseline, scraper-agent roadmap
+- `@.claude/skills/originality-search/SKILL.md` — creator library + brain similarity ranking, Whisper + nomic-embed wiring (PRD §11.6)
 
 If a task touches one of these domains, load the skill first.
 

@@ -133,7 +133,7 @@ export function AudioSurface() {
           />
           <div>
             <div className="text-base text-white/80">
-              {file ? file.name : 'Drop audio · 15–60s'}
+              {file ? file.name : 'Drop audio · 15–180s'}
             </div>
             <div className="mt-1 text-xs text-white/30">mp3 · wav · m4a</div>
           </div>
@@ -153,7 +153,7 @@ export function AudioSurface() {
       <div className="flex shrink-0 items-center justify-between text-xs text-white/50">
         <div className="flex items-center gap-3">
           <span>{file ? file.name : 'no file selected'}</span>
-          {fileTooLong && <span className="text-red-400">clip exceeds 60s</span>}
+          {fileTooLong && <span className="text-red-400">clip exceeds {TUNING.MAX_MEDIA_SECONDS}s</span>}
           {status === 'streaming' && <span className="text-orange-300">streaming…</span>}
           {status === 'complete' && (
             <span className="text-emerald-300">

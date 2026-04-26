@@ -382,7 +382,39 @@
   # Drop hero video → analyze → predict-engagement → all return 200, predicted_rate is finite, percentile in [0,100].
   ```
 
-> 🛑 **PHASE 2 GATE:** Beats 2+3 work 2× in a row. **`/clear` before Phase 3.**
+### P2-09 · Backend originality library — `library.py` + transcript stack (PRD §11.6)
+- **References:** `@docs/PRD.md#§11.6,§8.5,§8.6`
+- **Files to create:** `cortex/gx10/brain/library.py`, `cortex/gx10/brain/transcribe.py`, `cortex/gx10/brain/text_embed.py`, `cortex/gx10/tests/test_library.py`
+- **Action:**
+  1. `transcribe.py`: lazy-load `whisper.load_model("base")`, `transcribe(audio_path) -> str`.
+  2. `text_embed.py`: lazy-load `SentenceTransformer("nomic-ai/nomic-embed-text-v1.5", trust_remote_code=True)`, `embed_text(s) -> np.ndarray[768]` (L2-normed).
+  3. `library.py`: `LibraryEntry` dataclass; `load_creator_library(creator_id)` reads `cache/library/<creator_id>/*.json`; `save_entry(entry)` writes one file; `rank_similar(brain_vec, text_vec, library, top_k=3)` returns list with weighted cosine + ROI breakdown via `pooling.ROI_GROUPS`.
+- **Verification:**
+  ```bash
+  cd cortex/gx10 && pytest tests/test_library.py -v
+  # rank_similar with mocked brain/text vecs returns top_k matches; cold-start <5 returns empty list.
+  ```
+
+### P2-10 · Backend `POST /library/upload` + `GET /library/{creator_id}` + `POST /similarity`
+- **References:** `@docs/PRD.md#§9,§11.6`
+- **Files to modify:** `cortex/gx10/brain/main.py`, `cortex/gx10/brain/models.py` (already has DTOs)
+- **Action:**
+  1. `/library/upload` (multipart): re-uses video TRIBE pipeline, also calls `transcribe` + `text_embed`, writes `cache/library/<creator_id>/<video_id>.json`, updates in-memory `_LIBRARIES: dict[str, list[LibraryEntry]]`.
+  2. `/library/{creator_id}` returns metadata-only listing.
+  3. `/similarity`: pulls cached `pooled_features` + `text_embedding` from `_JOBS[job_id]` (cache them in `/stream` next to engagement features), calls `library.rank_similar`, returns `SimilarityResponse`. Cold-start gate at `SIMILARITY_MIN_LIBRARY_SIZE`.
+- **Verification:**
+  ```bash
+  cd cortex/gx10 && pytest tests/test_video_e2e.py::test_similarity_cold_start -v
+  cd cortex/gx10 && pytest tests/test_video_e2e.py::test_similarity_after_5_uploads -v
+  ```
+
+### P2-11 · Frontend `LibraryUploader.tsx` + `SimilarityPanel.tsx`
+- **References:** `@docs/PRD.md#§7.5,§7.6`
+- **Files to create:** `cortex/web/src/app/components/LibraryUploader.tsx`, `cortex/web/src/app/components/SimilarityPanel.tsx`
+- **Files to modify:** `cortex/web/src/app/components/VideoSurface.tsx` (mount `SimilarityPanel` below `EngagementCard`), `cortex/web/src/app/lib/brainClient.ts` (add `uploadLibraryEntry`, `getLibrary`, `predictSimilarity`)
+- **Verification:** drop 5+ library mp4s in uploader → POST /similarity for a fresh draft → 3 thumbnail cards render in <100ms after EngagementCard. Click → side drawer with match details. Library size <5 → panel hidden, replaced with "upload N more clips" hint.
+
+> 🛑 **PHASE 2 GATE:** Beats 2+3+3.5 work 2× in a row. **`/clear` before Phase 3.**
 
 ---
 

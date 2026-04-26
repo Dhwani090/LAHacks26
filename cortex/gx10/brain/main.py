@@ -22,8 +22,11 @@ from . import config, models, streaming
 from .cache import hero_cache
 from .corpus import corpus
 from .gemma import gemma_service
-from .pooling import frames_to_array, pool_tribe_output
+from .library import LibraryEntry, library_registry, now_iso, rank_similar
+from .pooling import frames_to_array, pool_tribe_output, roi_mean_vector
 from .predictor import load_default_predictor, predictor
+from .text_embed import embed_text
+from .transcribe import transcribe
 from .tribe import tribe_service
 
 logger = logging.getLogger(__name__)
@@ -137,14 +140,24 @@ async def stream(job_id: str) -> EventSourceResponse:
         yield streaming.cold_zones(result["cold_zones"])
         yield streaming.suggestions([])
 
-        # For video jobs, cache pooled TRIBE features so /predict-engagement can
-        # look them up by job_id without re-running inference.
+        # For video jobs, cache pooled TRIBE features + ROI means + transcript
+        # embedding so /predict-engagement and /similarity can look them up by
+        # job_id without re-running inference.
         if mode == "video":
             try:
                 arr = frames_to_array(result["brain_frames"])
                 job["pooled_features"] = pool_tribe_output(arr).tolist()
+                job["roi_means"] = roi_mean_vector(arr).tolist()
                 job["duration_s"] = float(result.get("duration_s") or arr.shape[0])
                 job["n_cold_zones"] = int(len(result.get("cold_zones") or []))
+                transcript_words = result.get("transcript") or []
+                transcript_text = " ".join(
+                    w.get("text", "") if isinstance(w, dict) else str(w)
+                    for w in transcript_words
+                ).strip()
+                job["transcript_text"] = transcript_text
+                if transcript_text:
+                    job["text_embedding"] = embed_text(transcript_text).tolist()
             except Exception as exc:
                 logger.error("pooling failed for job %s: %s", job_id, exc)
 
@@ -212,4 +225,135 @@ async def predict_engagement(req: models.PredictEngagementRequest) -> models.Pre
         followers_used=followers,
         duration_s=duration_s,
         n_cold_zones=n_cold_zones,
+    )
+
+
+# §11.6 — creator library + originality search.
+
+@app.post("/library/upload", response_model=models.LibraryUploadResponse)
+async def library_upload(
+    creator_id: str = Form(...),
+    file: UploadFile = File(...),
+) -> models.LibraryUploadResponse:
+    """Run TRIBE + Whisper + nomic-embed on the uploaded clip, persist only the
+    features/embedding/transcript per creator, then delete the source mp4.
+
+    PRD §11.6: the originality library is brain-features-only — we do not store
+    the raw video. The library is also append-only: same `video_id` (Path stem)
+    overwrites the existing entry rather than duplicating.
+    """
+    if not creator_id.strip():
+        raise HTTPException(status_code=400, detail="creator_id required")
+    safe_name = (file.filename or "upload.mp4").replace("/", "_")
+    video_id = Path(safe_name).stem or uuid.uuid4().hex[:12]
+
+    tmp_path = config.CACHE_DIR / "library_uploads" / creator_id / safe_name
+    tmp_path.parent.mkdir(parents=True, exist_ok=True)
+    with tmp_path.open("wb") as f:
+        f.write(await file.read())
+
+    try:
+        result = tribe_service.analyze_video(tmp_path)
+        arr = frames_to_array(result["brain_frames"])
+        pooled = pool_tribe_output(arr)
+        roi_means = roi_mean_vector(arr)
+        transcript = transcribe(tmp_path)
+        text_vec = embed_text(transcript)
+        duration_s = float(result.get("duration_s") or arr.shape[0])
+    except Exception as exc:
+        logger.error("library upload pipeline failed for %s/%s: %s", creator_id, video_id, exc)
+        tmp_path.unlink(missing_ok=True)
+        raise HTTPException(status_code=500, detail=f"library pipeline failed: {exc}")
+    finally:
+        # Drop the mp4 — features + embeddings + transcript are all we keep.
+        tmp_path.unlink(missing_ok=True)
+
+    entry = LibraryEntry(
+        video_id=video_id,
+        uploaded_at=now_iso(),
+        duration_s=duration_s,
+        tribe_pooled=pooled,
+        roi_means=roi_means,
+        transcript=transcript,
+        text_embedding=text_vec,
+        thumbnail_url=None,
+    )
+    library_registry.save_entry(creator_id, entry)
+    return models.LibraryUploadResponse(
+        library_entry_id=video_id,
+        library_size=library_registry.size(creator_id),
+    )
+
+
+@app.get("/library/{creator_id}", response_model=models.LibraryListResponse)
+async def library_list(creator_id: str) -> models.LibraryListResponse:
+    entries = library_registry.load_creator_library(creator_id)
+    return models.LibraryListResponse(
+        creator_id=creator_id,
+        size=len(entries),
+        entries=[
+            models.LibraryEntryMeta(
+                video_id=e.video_id,
+                uploaded_at=e.uploaded_at,
+                duration_s=e.duration_s,
+                thumbnail_url=e.thumbnail_url,
+            )
+            for e in entries
+        ],
+    )
+
+
+@app.post("/similarity", response_model=models.SimilarityResponse)
+async def similarity(req: models.SimilarityRequest) -> models.SimilarityResponse:
+    import numpy as np
+
+    job = _JOBS.get(req.job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="unknown job_id")
+    if job.get("mode") != "video":
+        raise HTTPException(status_code=400, detail="similarity requires a video job")
+    pooled = job.get("pooled_features")
+    roi_means = job.get("roi_means")
+    if not pooled or not roi_means:
+        raise HTTPException(status_code=409, detail="job has no pooled features yet — wait for /stream complete")
+
+    library = library_registry.load_creator_library(req.creator_id)
+    if len(library) < config.SIMILARITY_MIN_LIBRARY_SIZE:
+        return models.SimilarityResponse(
+            matches=[],
+            library_size=len(library),
+            creator_id=req.creator_id,
+            message=f"upload at least {config.SIMILARITY_MIN_LIBRARY_SIZE} past clips to enable originality search",
+        )
+
+    text_emb = job.get("text_embedding")
+    draft_text = (
+        np.asarray(text_emb, dtype=np.float32)
+        if text_emb is not None
+        else embed_text(job.get("transcript_text") or "")
+    )
+
+    matches = rank_similar(
+        draft_brain=np.asarray(pooled, dtype=np.float32),
+        draft_text=draft_text,
+        draft_roi_means=np.asarray(roi_means, dtype=np.float32),
+        library=library,
+    )
+    return models.SimilarityResponse(
+        matches=[
+            models.SimilarityMatch(
+                video_id=m["video_id"],
+                score=m["score"],
+                thumbnail_url=m["thumbnail_url"],
+                uploaded_at=m["uploaded_at"],
+                duration_s=m["duration_s"],
+                dominant_roi=m["dominant_roi"],
+                roi_breakdown=models.RoiBreakdown(**m["roi_breakdown"]),
+                text_similarity=m["text_similarity"],
+            )
+            for m in matches
+        ],
+        library_size=len(library),
+        creator_id=req.creator_id,
+        weighting={"brain": config.SIMILARITY_BRAIN_WEIGHT, "text": config.SIMILARITY_TEXT_WEIGHT},
     )

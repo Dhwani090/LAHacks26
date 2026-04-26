@@ -12,6 +12,12 @@ import { TUNING } from '../lib/tuning';
 import { useAppState } from '../state/AppState';
 import type { ColdZone, EngagementCurves, TranscriptWord } from '../lib/types';
 import { EngagementTimeline } from './EngagementTimeline';
+import { LibraryUploader } from './LibraryUploader';
+import { SimilarityPanel } from './SimilarityPanel';
+
+// Single-creator demo build — every upload goes into one library bucket.
+// PRD §11.6 caveat: multi-tenant comes after the hackathon.
+const DEMO_CREATOR_ID = 'demo';
 
 export function VideoSurface() {
   const [file, setFile] = useState<File | null>(null);
@@ -24,6 +30,7 @@ export function VideoSurface() {
   const coldZones = useAppState((s) => s.coldZones);
   const engagementCurves = useAppState((s) => s.engagementCurves);
   const durationS = useAppState((s) => s.durationS);
+  const jobId = useAppState((s) => s.jobId);
   const setStatus = useAppState((s) => s.setStatus);
   const setJobId = useAppState((s) => s.setJobId);
   const setColdZones = useAppState((s) => s.setColdZones);
@@ -33,6 +40,7 @@ export function VideoSurface() {
   const setDurationS = useAppState((s) => s.setDurationS);
   const setError = useAppState((s) => s.setError);
   const resetAnalysis = useAppState((s) => s.resetAnalysis);
+  const [librarySize, setLibrarySize] = useState<number | null>(null);
 
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const unsubRef = useRef<(() => void) | null>(null);
@@ -134,7 +142,7 @@ export function VideoSurface() {
               onChange={(e) => setFile(e.target.files?.[0] ?? null)}
             />
             <div>
-              <div className="text-base text-white/80">Drop video · 15–60s</div>
+              <div className="text-base text-white/80">Drop video · 15–180s</div>
               <div className="mt-1 text-xs text-white/30">mp4 · mov</div>
             </div>
           </label>
@@ -149,12 +157,22 @@ export function VideoSurface() {
             onPickColdZone={handlePickColdZone}
           />
         )}
+
+        {status === 'complete' && jobId && (
+          <SimilarityPanel
+            jobId={jobId}
+            creatorId={DEMO_CREATOR_ID}
+            refreshKey={librarySize ?? 0}
+          />
+        )}
+
+        <LibraryUploader creatorId={DEMO_CREATOR_ID} onLibraryChange={setLibrarySize} />
       </div>
 
       <div className="flex shrink-0 items-center justify-between text-xs text-white/50">
         <div className="flex items-center gap-3">
           <span>{file ? file.name : 'no file selected'}</span>
-          {fileTooLong && <span className="text-red-400">clip exceeds 60s</span>}
+          {fileTooLong && <span className="text-red-400">clip exceeds {TUNING.MAX_MEDIA_SECONDS}s</span>}
           {status === 'streaming' && <span className="text-orange-300">streaming…</span>}
           {status === 'complete' && (
             <span className="text-emerald-300">

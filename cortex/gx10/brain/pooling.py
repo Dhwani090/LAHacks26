@@ -137,3 +137,21 @@ def frames_to_array(brain_frames: list[dict[str, Any]]) -> np.ndarray:
         raise ValueError("empty brain_frames")
     arr = np.asarray([f["activation"] for f in brain_frames], dtype=np.float32)
     return arr
+
+
+def roi_mean_vector(preds: np.ndarray, roi_indices: dict[str, np.ndarray] | None = None) -> np.ndarray:
+    """Reduce (T, 20484) → (3,) — time-and-vertex mean per ROI group.
+
+    Used by §11.6 originality search for the per-ROI breakdown chip
+    ("auditory cortex match: 95%"). Distinct from `pool_tribe_output`,
+    which returns 21 stats per ROI; this is the cleaner 3-number signal
+    for the cosine-similarity tie-breaker.
+    """
+    if preds.ndim != 2 or preds.shape[1] != config.TRIBE_VERTEX_COUNT:
+        raise ValueError(f"expected (T, {config.TRIBE_VERTEX_COUNT}), got {preds.shape}")
+    indices = roi_indices if roi_indices is not None else get_roi_indices()
+    out = np.zeros(3, dtype=np.float32)
+    for i, group in enumerate(("visual", "auditory", "language")):
+        idx = _group_indices(indices, ROI_GROUPS[group])
+        out[i] = float(preds[:, idx].mean())
+    return np.nan_to_num(out, nan=0.0, posinf=0.0, neginf=0.0)

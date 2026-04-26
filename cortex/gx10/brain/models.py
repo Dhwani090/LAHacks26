@@ -81,3 +81,52 @@ class ApplySuggestionRequest(BaseModel):
 class ApplySuggestionResponse(BaseModel):
     new_text: str | None = None
     job_id: str | None = None
+
+
+# §11.6 — creator library + originality search.
+class SimilarityRequest(BaseModel):
+    job_id: str
+    creator_id: str = Field(..., min_length=1, max_length=64)
+
+
+class RoiBreakdown(BaseModel):
+    visual: float
+    auditory: float
+    language: float
+
+
+class SimilarityMatch(BaseModel):
+    video_id: str
+    score: float
+    thumbnail_url: str | None = None
+    uploaded_at: str
+    duration_s: float
+    dominant_roi: Literal["visual", "auditory", "language"]
+    roi_breakdown: RoiBreakdown
+    text_similarity: float
+
+
+class SimilarityResponse(BaseModel):
+    matches: list[SimilarityMatch]
+    library_size: int
+    creator_id: str
+    weighting: dict[str, float] | None = None
+    message: str | None = None
+
+
+class LibraryEntryMeta(BaseModel):
+    video_id: str
+    uploaded_at: str
+    duration_s: float
+    thumbnail_url: str | None = None
+
+
+class LibraryListResponse(BaseModel):
+    creator_id: str
+    size: int
+    entries: list[LibraryEntryMeta]
+
+
+class LibraryUploadResponse(BaseModel):
+    library_entry_id: str
+    library_size: int

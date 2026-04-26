@@ -12,8 +12,8 @@ import { TUNING } from '../lib/tuning';
 
 const MODES: { id: Mode; label: string; hint: string }[] = [
   { id: 'text', label: 'Text', hint: 'paste up to 500 words' },
-  { id: 'audio', label: 'Audio', hint: '15–60s clip' },
-  { id: 'video', label: 'Video', hint: '15–60s clip' },
+  { id: 'audio', label: 'Audio', hint: '15–180s clip' },
+  { id: 'video', label: 'Video', hint: '15–180s clip' },
 ];
 
 export function ModeTabs() {

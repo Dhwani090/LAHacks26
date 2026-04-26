@@ -8,6 +8,9 @@ import type {
   BrainFrame,
   ColdZone,
   EditSuggestion,
+  LibraryListResponse,
+  LibraryUploadResponse,
+  SimilarityResponse,
   TranscriptWord,
 } from './types';
 
@@ -85,6 +88,32 @@ export const brainClient = {
     signal?: AbortSignal,
   ): Promise<{ new_text?: string; job_id?: string }> {
     return postJson('/apply-suggestion', { clip_id: clipId, suggestion_id: suggestionId, action }, signal);
+  },
+
+  // §11.6 — creator library + originality search.
+  uploadLibraryEntry(
+    creatorId: string,
+    file: File,
+    signal?: AbortSignal,
+  ): Promise<LibraryUploadResponse> {
+    const fd = new FormData();
+    fd.append('creator_id', creatorId);
+    fd.append('file', file);
+    return postForm<LibraryUploadResponse>('/library/upload', fd, signal);
+  },
+
+  async getLibrary(creatorId: string, signal?: AbortSignal): Promise<LibraryListResponse> {
+    const res = await fetch(url(`/library/${encodeURIComponent(creatorId)}`), { signal });
+    if (!res.ok) throw new BrainClientError(`/library/${creatorId} → ${res.status}`);
+    return (await res.json()) as LibraryListResponse;
+  },
+
+  predictSimilarity(
+    jobId: string,
+    creatorId: string,
+    signal?: AbortSignal,
+  ): Promise<SimilarityResponse> {
+    return postJson<SimilarityResponse>('/similarity', { job_id: jobId, creator_id: creatorId }, signal);
   },
 
   resolveCacheUrl(pathOrUrl: string): string {

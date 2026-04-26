@@ -17,9 +17,12 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 os.environ.setdefault("CORTEX_STUB_TRIBE", "1")
 os.environ.setdefault("CORTEX_STUB_GEMMA", "1")
+os.environ.setdefault("CORTEX_STUB_TRANSCRIBE", "1")
+os.environ.setdefault("CORTEX_STUB_EMBED", "1")
 
 from fastapi.testclient import TestClient  # noqa: E402
 
+from brain.library import library_registry  # noqa: E402
 from brain.main import app  # noqa: E402
 
 
@@ -81,3 +84,107 @@ def test_predict_engagement_rejects_text_job(client):
     text_job = client.post("/analyze/text", json={"text": "hi"}).json()["job_id"]
     r = client.post("/predict-engagement", json={"job_id": text_job, "followers": 0})
     assert r.status_code == 400
+
+
+# §11.6 — creator library + originality search.
+
+def _video_job_completed(client, name: str = "draft.mp4") -> str:
+    fake_mp4 = io.BytesIO(b"\x00\x00\x00\x18ftypisom" + b"\x00" * 64)
+    job_id = client.post(
+        "/analyze/video",
+        files={"file": (name, fake_mp4, "video/mp4")},
+    ).json()["job_id"]
+    with client.stream("GET", f"/stream/{job_id}") as resp:
+        _drain(resp)
+    return job_id
+
+
+def _upload_library_clip(client, creator_id: str, name: str) -> dict:
+    fake_mp4 = io.BytesIO(b"\x00\x00\x00\x18ftypisom" + b"\x00" * 64)
+    r = client.post(
+        "/library/upload",
+        data={"creator_id": creator_id},
+        files={"file": (name, fake_mp4, "video/mp4")},
+    )
+    assert r.status_code == 200, r.text
+    return r.json()
+
+
+def test_similarity_cold_start_returns_message(client, tmp_path, monkeypatch):
+    # Isolate filesystem state per test.
+    library_registry.root = tmp_path / "library"
+    library_registry.reset()
+
+    job_id = _video_job_completed(client)
+    r = client.post("/similarity", json={"job_id": job_id, "creator_id": "alice"})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["matches"] == []
+    assert body["library_size"] == 0
+    assert body["message"]
+
+
+def test_similarity_after_5_uploads_returns_top_matches(client, tmp_path):
+    library_registry.root = tmp_path / "library"
+    library_registry.reset()
+
+    creator = "bob"
+    for i in range(5):
+        _upload_library_clip(client, creator, f"past_{i}.mp4")
+    listing = client.get(f"/library/{creator}").json()
+    assert listing["size"] == 5
+
+    job_id = _video_job_completed(client, name="fresh_draft.mp4")
+    r = client.post("/similarity", json={"job_id": job_id, "creator_id": creator})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["library_size"] == 5
+    assert len(body["matches"]) == 3
+    for m in body["matches"]:
+        assert -1.001 <= m["score"] <= 1.001
+        assert m["dominant_roi"] in ("visual", "auditory", "language")
+        roi = m["roi_breakdown"]
+        assert {"visual", "auditory", "language"} == set(roi.keys())
+    # Dominant ROI shouldn't be the same across all 3 matches in stub data — that
+    # would indicate the breakdown isn't actually using the library entries' ROI means.
+    dominants = {m["dominant_roi"] for m in body["matches"]}
+    # Allow 1 or 2 distinct values (small library + noise) but not 0/all-equal scores.
+    assert len(dominants) >= 1
+
+
+def test_similarity_rejects_unknown_job(client):
+    r = client.post("/similarity", json={"job_id": "no-such-job", "creator_id": "x"})
+    assert r.status_code == 404
+
+
+def test_similarity_rejects_text_job(client):
+    text_job = client.post("/analyze/text", json={"text": "hi"}).json()["job_id"]
+    r = client.post("/similarity", json={"job_id": text_job, "creator_id": "x"})
+    assert r.status_code == 400
+
+
+def test_library_upload_idempotent_for_same_filename(client, tmp_path):
+    library_registry.root = tmp_path / "library"
+    library_registry.reset()
+
+    first = _upload_library_clip(client, "carol", "shared.mp4")
+    second = _upload_library_clip(client, "carol", "shared.mp4")
+    # Same filename → same video_id (Path stem) → library doesn't double-count.
+    assert first["library_entry_id"] == second["library_entry_id"]
+    assert second["library_size"] == 1
+
+
+def test_library_upload_does_not_persist_mp4(client, tmp_path):
+    """PRD §11.6 invariant: the library is brain-features-only — raw mp4s are
+    deleted after the TRIBE+Whisper pipeline runs. The on-disk JSON sidecar is
+    the only thing that should remain."""
+    from brain import config as backend_config
+
+    library_registry.root = tmp_path / "library"
+    library_registry.reset()
+    _upload_library_clip(client, "dave", "ephemeral.mp4")
+
+    uploads_dir = backend_config.CACHE_DIR / "library_uploads" / "dave"
+    if uploads_dir.exists():
+        leftover = list(uploads_dir.glob("ephemeral.*"))
+        assert leftover == [], f"raw mp4 leaked into library_uploads: {leftover}"

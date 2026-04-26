@@ -46,7 +46,7 @@ Why this only works now: TRIBE v2 was open-sourced one month ago. Most teams at 
 - iOS or Android app — desktop web only
 - User accounts, login, auth, OAuth, social sign-in
 - Multi-day project history or shareable links
-- Long-form content (>60 seconds video, >60 seconds audio, >500 words text)
+- Long-form content (>180 seconds video, >180 seconds audio, >500 words text). 180s is the platform-aware ceiling: YouTube Shorts now allows up to 3min, IG Reels max 90s, most TikToks <120s. Past that, the TRIBE pooling assumptions (per-clip ROI averaging) stop matching how creators think about short-form pacing.
 - Auto-editing of video by cutting low-engagement spans (the cuts-on-cold-zones loop is removed — the diagnostic + the engagement number is the product)
 - Auto-regeneration of new content (no B-roll generation, no voice synthesis, no music swap, no script rewriting beyond inline text-mode suggestions)
 - Real-time live camera or microphone input
@@ -79,7 +79,10 @@ Two-tier, fully local during the demo, talking over Tailscale.
 - **`transformers` + Gemma 2B** for text-mode rewrite suggestions
 - **`scikit-learn`** for the engagement-prediction model (ridge regression baseline; see §11.2 for the upgrade path)
 - **`yt-dlp`** for ingesting YouTube Shorts (and, where it works, IG Reels / TikTok) into the training corpus
-- In-memory cache + filesystem JSON cache + a single `corpus.jsonl` of `{video_id, tribe_features, engagement_rate, followers, ...}` rows. **NO Chroma, NO SQLite.**
+- **`openai-whisper` (base)** for audio→transcript on creator-library uploads (§11.6) — runs on the box, no API call
+- **`sentence-transformers` (`nomic-embed-text-v1.5`)** for transcript embeddings used in originality search (§11.6)
+- **`numpy`** stacked-matrix cosine for similarity ranking — no FAISS, no vector DB. <10k clips fits in <100MB and ranks in <50ms.
+- In-memory cache + filesystem JSON cache + a single `corpus.jsonl` of `{video_id, tribe_features, engagement_rate, followers, ...}` rows + per-creator `cache/library/<creator_id>/*.json` for the originality library. **NO Chroma, NO SQLite.**
 - Pydantic v2 for DTOs
 
 ### Transport
@@ -94,8 +97,10 @@ Two-tier, fully local during the demo, talking over Tailscale.
 - Gemma 2B loaded at startup (~5GB resident)
 - `engagement_predictor.pkl` (a scikit-learn ridge regressor over pooled TRIBE features) — kilobytes, loaded into RAM
 - `corpus.jsonl` of pre-computed `{tribe_features, engagement_rate, followers}` rows — used both for training and as the percentile-rank reference at inference time (~10MB for 200 videos)
+- Whisper-base (~150MB) + `nomic-embed-text-v1.5` (~550MB) loaded at startup for the originality library (§11.6)
+- Per-creator library `cache/library/<creator_id>/*.json` — TRIBE features + transcript embedding + thumbnail per past clip. Loaded on demand into a `creator_id → list[LibraryEntry]` in-memory dict. ~8KB/clip; 10k clips = 80MB.
 - Optional offline batch ingest: `yt-dlp` pulls a trending-Shorts batch → TRIBE runs over each → corpus appends → predictor refits. This is a separate `scripts/refit_predictor.py` invocation, not a service. The roadmap version replaces the cron with an OpenClaw / NemoClaw browser-agent loop.
-- Total resident: ~35-40GB of 128GB. Plenty of headroom.
+- Total resident: ~36-42GB of 128GB (TRIBE + Gemma + Whisper + nomic + corpus + creator libraries). The remaining ~85GB is room for very large creator libraries — a creator with 5,000 past clips fits with multiple GB to spare.
 
 ---
 
@@ -153,7 +158,7 @@ Total pre-hack budget: **~14-15 hours**. If PH-B fails by **Wed April 23 EOD**, 
 
 ### 6.2 Audio mode (the surprise)
 
-**Input:** 15-60s audio clip (mp3, wav, m4a).
+**Input:** 15-180s audio clip (mp3, wav, m4a).
 **TRIBE pathway:** audio + language (Wav2Vec-BERT + LLaMA, no V-JEPA).
 **Inference latency:** ~15s.
 **Output:** waveform + 2-track timeline (auditory green, language orange), brain pulses (no visual cortex).
@@ -161,13 +166,15 @@ Total pre-hack budget: **~14-15 hours**. If PH-B fails by **Wed April 23 EOD**, 
 
 ### 6.3 Video mode (the spectacle + engagement prediction)
 
-**Input:** 15-60s video clip (mp4, mov), plus an optional `followers` integer the user types in (defaults to median of corpus).
+**Input:** 15-180s video clip (mp4, mov), plus an optional `followers` integer the user types in (defaults to median of corpus).
 **TRIBE pathway:** full trimodal.
 **Inference latency:** ~25-40s for TRIBE; the predictor runs in <50ms once features land.
 **Output:**
 - Video player + 3-track timeline (visual blue, auditory green, language orange), brain syncs to playback. Cold zones highlighted in red on the timeline.
 - Engagement card: predicted rate (e.g. *"8.4% expected"* — views/followers, log-space prediction exponentiated for display) + percentile vs. the seed corpus + a one-line interpretation (*"top 25% — this is hot for your audience size"*).
-**Verification:** drop hero clip → 3-track timeline visible within 45s. Play video → brain pulses in sync. Click red cold zone → player jumps to that timestamp. Engagement card renders within 1s after TRIBE complete.
+- Originality panel (§11.6): top 3 most-similar past clips from the creator's library, each with a similarity score + per-ROI breakdown chip (*"auditory cortex match: 95%"*). Hidden if library < 5 clips.
+
+**Verification:** drop hero clip → 3-track timeline visible within 45s. Play video → brain pulses in sync. Click red cold zone → player jumps to that timestamp. Engagement card renders within 1s after TRIBE complete. Originality panel renders within 100ms after engagement card lands (in-memory cosine).
 
 ---
 
@@ -185,6 +192,8 @@ app/
 │   ├── VideoSurface.tsx    # Video uploader + player + 3-track timeline + EngagementCard
 │   ├── EngagementTimeline.tsx  # Reusable N-track timeline
 │   ├── EngagementCard.tsx  # Predicted-engagement number + percentile + interpretation
+│   ├── SimilarityPanel.tsx # §11.6 — top-3 past clips with ROI breakdown chips
+│   ├── LibraryUploader.tsx # Bulk uploader for creator's past clips → /library/upload
 │   ├── HeatmapText.tsx     # Per-word color overlay
 │   ├── SuggestionPanel.tsx # Text-mode Gemma rewrite suggestions, click-to-apply
 │   ├── StatusChip.tsx      # GX10 connection status
@@ -223,6 +232,17 @@ app/
 - Shows a "trained on N videos · last updated X" caption (transparent about corpus size)
 - Followers field defaults to corpus-median; user can edit and the card re-renders client-side without re-running TRIBE
 
+### 7.5 SimilarityPanel verification
+- Hidden when library has <5 entries (cold-start gate)
+- After EngagementCard lands, renders top 3 thumbnails with overall score + ROI breakdown chip in <100ms
+- Click on a card opens a side drawer with the matched clip's metadata (uploaded date, duration, transcript snippet)
+- Sanity check: same clip uploaded as both library + draft → top match is itself with score ~1.0
+
+### 7.6 LibraryUploader verification
+- Drag-drop multiple mp4s → POST `/library/upload` for each → progress bar per file
+- Each upload triggers TRIBE + Whisper + transcript-embed pipeline; status reported via SSE
+- After all uploads complete, library size badge updates and SimilarityPanel becomes available on next analysis
+
 ---
 
 ## §8 — Backend modules (FastAPI on GX10)
@@ -238,6 +258,9 @@ gx10/
 │   ├── predictor.py         # Engagement-prediction model (ridge regression on pooled TRIBE features)
 │   ├── pooling.py           # TRIBE (T,20484) → ~25-dim feature vector via ROI grouping + stats
 │   ├── corpus.py            # Reads/writes cache/corpus.jsonl; computes percentile ranks
+│   ├── library.py           # §11.6 — per-creator library load/save + cosine ranking
+│   ├── transcribe.py        # §11.6 — Whisper-base wrapper for audio→transcript
+│   ├── text_embed.py        # §11.6 — nomic-embed-text wrapper, 768-dim L2-normed
 │   ├── cache.py             # Filesystem JSON cache + fallback
 │   ├── streaming.py         # SSE helpers
 │   └── prompts.py           # All Gemma prompts
@@ -276,7 +299,17 @@ gx10/
 - Percentile computed against `corpus.jsonl` rates; falls back to "median" if corpus is empty
 - Model class is intentionally swappable — see §11.2 for upgrade path
 
-### 8.5 `cache.py` verification
+### 8.5 `library.py` verification
+- `load_creator_library(creator_id)` returns a list of `LibraryEntry` (TRIBE-pooled vec + text embedding + meta) from `cache/library/<creator_id>/*.json`
+- `rank_similar(draft_brain_vec, draft_text_vec, library, top_k=3)` returns top-K with weighted cosine `α·brain + (1-α)·text` and a per-ROI breakdown
+- Stacked-matrix numpy cosine over 10k entries returns in <50ms
+- Returns empty `matches` + cold-start message when library size <5
+
+### 8.6 `transcribe.py` + `text_embed.py` verification
+- `transcribe(audio_path) -> str` runs Whisper-base on CPU/MPS, returns within ~1.5x realtime
+- `embed_text(s) -> np.ndarray[768]` runs `nomic-embed-text-v1.5`, returns L2-normalized vector
+
+### 8.7 `cache.py` verification
 - Hero clips load at startup (`/health` reports `cache_size > 0`)
 - Live request matching cached hash returns in <500ms
 - Cache miss falls through to live inference
@@ -338,6 +371,41 @@ JOB=$(curl -s -X POST .../analyze/video -F file=@hero.mp4 | jq -r .job_id)
 curl -s -X POST .../predict-engagement -H 'content-type: application/json' \
   -d "{\"job_id\":\"$JOB\",\"followers\":10000}" | jq .
 # Returns 200 with predicted_rate ∈ (0, 1] and percentile ∈ [0, 100] within <100ms.
+```
+
+### POST `/library/upload`
+**Request:** multipart with video file + `creator_id` form field.
+**Response:** `{library_entry_id, library_size}` after TRIBE + Whisper + transcript-embed pipeline finishes (~30-60s; client should drive a progress UI from /stream/{job_id}).
+**Side effect:** persists `cache/library/<creator_id>/<video_id>.json`; in-memory creator library updated.
+
+### GET `/library/{creator_id}`
+**Response:** `{creator_id, size, entries: [{video_id, uploaded_at, duration_s, thumbnail_url}]}` — metadata only, no embeddings.
+**Verification:** after 5 uploads, `size == 5` and entries list has matching video_ids.
+
+### POST `/similarity`
+**Request:** `{job_id: string, creator_id: string}` — `job_id` from completed `/analyze/video`.
+**Response:**
+```
+{
+  "matches": [
+    {"video_id": "...", "score": 0.91, "thumbnail_url": "...",
+     "uploaded_at": "2026-03-12T18:42:00Z", "dominant_roi": "auditory",
+     "roi_breakdown": {"visual": 0.62, "auditory": 0.95, "language": 0.78},
+     "text_similarity": 0.81, "duration_s": 38}
+  ],
+  "library_size": 47,
+  "creator_id": "...",
+  "weighting": {"brain": 0.6, "text": 0.4}
+}
+```
+- If `library_size < 5`: returns `{"matches": [], "library_size": N, "message": "upload at least 5 past clips"}`.
+- Returns in <100ms.
+
+**Verification:**
+```bash
+curl -s -X POST .../similarity -H 'content-type: application/json' \
+  -d "{\"job_id\":\"$JOB\",\"creator_id\":\"hero\"}" | jq .
+# After ≥5 library uploads → 3 matches with non-uniform roi_breakdown values.
 ```
 
 ---
@@ -436,6 +504,51 @@ Demo path = `yt-dlp` + manual URL list. **Roadmap path = an OpenClaw or NemoClaw
 
 **Verification:** apply a suggestion on a hero paragraph → re-render in <12s with visible warming on the formerly-cold sentence.
 
+### 11.6 Creator library + originality search
+
+The 128 GB unified memory turns into a feature here: a creator's entire short-form back-catalog can live in RAM as TRIBE features + transcript embeddings, and we can tell them, in <100ms, *"the brain pattern of this draft is 91% similar to your post from March 12 — you've made this video before."*
+
+This is the second pillar of the pitch. Engagement prediction asks *"will this work?"*; originality search asks *"are you repeating yourself?"* Both are creator-facing, both are GX10-native, both share the same TRIBE pipeline.
+
+**Library lifecycle:**
+1. Creator uploads N (≥5, gated) past Shorts/Reels/TikToks via the same uploader.
+2. For each: Phase 1 caches the mp4 + meta locally (no download from external platforms — files come from the creator's drive). Phase 2 runs TRIBE + transcribes the audio with Whisper-base + embeds the transcript with `nomic-embed-text-v1.5`.
+3. Each library entry persists as `cache/library/<creator_id>/<video_id>.json`:
+   ```json
+   {"video_id": "...", "uploaded_at": "...", "duration_s": 42,
+    "tribe_pooled": [...21 floats...],
+    "tribe_per_roi_curve": [...optional finer signal...],
+    "transcript": "...", "text_embedding": [...768 floats...],
+    "thumbnail_url": "..."}
+   ```
+4. Library entries are loaded into a per-creator in-memory dict at startup (or on first request after upload) — no vector DB. Brute-force cosine over <10k vectors is <50ms in numpy.
+
+**Live similarity flow (`POST /similarity`):**
+1. Frontend, after a draft `complete` SSE on `/analyze/video`, POSTs `{job_id, creator_id}`.
+2. Backend pulls cached `tribe_pooled` + transcript embedding for the draft job.
+3. For each library entry: `score = α · cos(brain_draft, brain_lib) + (1-α) · cos(text_draft, text_lib)` where α defaults to `SIMILARITY_BRAIN_WEIGHT = 0.6`.
+4. Rank, return top 3 with per-ROI similarity breakdown so the UI can say *"your auditory cortex pattern matches this clip — you tend to reach for the same audio hooks."*
+5. Response shape:
+   ```json
+   {"matches": [
+     {"video_id": "...", "score": 0.91, "thumbnail_url": "...",
+      "uploaded_at": "...", "dominant_roi": "auditory",
+      "roi_breakdown": {"visual": 0.62, "auditory": 0.95, "language": 0.78},
+      "text_similarity": 0.81}
+   ], "library_size": 47, "creator_id": "..."}
+   ```
+
+**Cold-start gate:** library < `SIMILARITY_MIN_LIBRARY_SIZE` (5) → endpoint returns `{matches: [], library_size: N, message: "upload at least 5 past clips"}`. Frontend hides the panel.
+
+**Frontend (`SimilarityPanel.tsx`):** below the EngagementCard, three thumbnail cards with similarity score + ROI breakdown chip. Click → opens the matched clip in a side drawer. Sub-100ms render after the prediction lands.
+
+**Memory budget:** 21 floats (84B) + 768-dim text embedding (3KB) + transcript (~5KB) + thumbnail URL ≈ 8KB per clip. 10k-clip library = 80MB. The 128GB box laughs.
+
+**Verification:**
+- Upload 5+ hero library clips → POST /similarity for a fresh draft → returns 3 matches with non-trivial ROI breakdown variance (not all 1.0, not all 0.0).
+- Library size 0–4 → endpoint returns the cold-start message; frontend hides panel.
+- Same draft uploaded twice → top match is itself with score ~1.0 (sanity check).
+
 ---
 
 ## §12 — Cache + fallback layer
@@ -463,6 +576,9 @@ Demo path = `yt-dlp` + manual URL list. **Roadmap path = an OpenClaw or NemoClaw
 | R9 | Engagement model R² is near zero — predictions don't track reality | Medium | Medium | Frame the demo around *"the brain features are predictive of variance, here's the honest R²"* — judges respect transparency. Fallback: hardcode "predicted top-quartile / median / bottom-quartile" buckets if the regressor goes haywire. |
 | R10 | yt-dlp blocked or rate-limited mid-ingest | Medium | Low | PH-I runs pre-hack; the corpus is on disk before the demo. If we want to *demo* live ingest, have a 3-video URL list pre-tested. |
 | R11 | Engagement metric in corpus is mostly "the algorithm pushed it" not "viewers liked it" | Inherent | Low | Frame as *"predicting algorithmic engagement"* — that's literally what creators want to optimize. Do not claim we predict *quality*. |
+| R12 | Whisper / nomic-embed model load adds startup latency (~30s extra) | Medium | Low | Lazy-load on first `/library/upload` instead of at server boot. Upload UX already has a progress bar so the cold-load tax hides inside it. |
+| R13 | Creator library top match is always trivially-similar (same speaker → identical voice features dominate) | Medium | Medium | Brain weight α=0.6 (not 1.0) keeps text similarity from dominating; if matches still feel uniform, expose the α slider in DebugOverlay so we can re-tune live. |
+| R14 | TRIBE 21-dim pooled vector is too coarse for similarity (everything looks similar) | Medium | Medium | Fall back to the per-ROI time-curve embeddings (`tribe_per_roi_curve` in `LibraryEntry`) — concatenated visual+auditory+language curves are 180-540 dims and discriminative enough to break ties. |
 
 ---
 
@@ -493,6 +609,13 @@ Point at the card.
 
 Type a different follower count into the box. Card re-renders instantly.
 > *"Change the audience size, the percentile updates client-side. The brain features don't change — only the comparison set does."*
+
+**Beat 3.5 — originality search (20s, the hardware flex).**
+Below the engagement card, three thumbnails of the creator's past clips appear with similarity scores.
+> *"And because the box has 128 gigs, we can keep their entire back-catalog in memory as TRIBE features. So when they upload this draft, we can also tell them — instantly — which of their past videos has the most similar brain pattern. They've already made this video. Or they haven't, and they're original. Either way, they know before they hit post."*
+
+Tap the top match → side drawer slides in showing it's a 91% brain match, especially in the auditory cortex.
+> *"Same hooks. Same audio rhythm. The brain doesn't lie — they're recycling."*
 
 **Beat 4 — switch to audio (15s).**
 Hit Audio tab. Pre-rendered podcast clip. Brain pulses but only auditory + language regions.

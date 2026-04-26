@@ -17,6 +17,16 @@ TRIBE_MODEL_ID = "facebook/tribev2"
 TRIBE_FRAME_RATE_HZ = 1.0
 TRIBE_VERTEX_COUNT = 20484
 
+# Clip duration ceiling — covers YT Shorts max (180s), IG Reels max (90s), and most TikToks.
+# Anything longer is rejected at the upload boundary (PRD §2 hard non-goal).
+MAX_CLIP_DURATION_S = 180
+
+# Similarity (PRD §11.6) — creator's personal library, brain + transcript fusion.
+SIMILARITY_BRAIN_WEIGHT = 0.6
+SIMILARITY_TEXT_WEIGHT = 0.4
+SIMILARITY_TOP_K = 3
+SIMILARITY_MIN_LIBRARY_SIZE = 5
+
 # Cold zones (skill: tribe-inference)
 COLD_THRESHOLD_Z = -0.5
 COLD_MIN_DURATION_S = 2.0

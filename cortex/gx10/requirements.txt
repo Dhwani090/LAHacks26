@@ -14,6 +14,10 @@ huggingface-hub>=0.23
 scikit-learn>=1.4
 joblib>=1.3
 yt-dlp>=2024.12.0
+# Originality / creator-library stack (PRD §11.6):
+openai-whisper>=20231117
+sentence-transformers>=2.7
+einops>=0.7
 # Undeclared transitive dep of cortexlab.training — must install explicitly.
 lightning
 # Installed separately to control ordering (NumPy must be pinned first):
