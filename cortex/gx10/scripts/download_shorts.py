@@ -33,33 +33,31 @@ from pathlib import Path
 logger = logging.getLogger("download_shorts")
 
 
+_YT_DLP_CACHE: list[str] | None = None
+
+
 def _yt_dlp_cmd() -> list[str]:
-    """Return the command prefix for invoking yt-dlp.
-
-    Prefers `<this-python> -m yt_dlp` when the module is importable in the running
-    interpreter (works inside venvs without polluting PATH). Falls back to the
-    `yt-dlp` binary on PATH otherwise.
-    """
+    """Return the command prefix for invoking yt-dlp. Resolved lazily (called from
+    fetch_metadata / download_video, not at import time, so utility imports of this
+    module don't fail when yt-dlp isn't installed)."""
+    global _YT_DLP_CACHE
+    if _YT_DLP_CACHE is not None:
+        return _YT_DLP_CACHE
     if importlib.util.find_spec("yt_dlp") is not None:
-        return [sys.executable, "-m", "yt_dlp"]
-    binary = shutil.which("yt-dlp")
-    if binary:
-        return [binary]
-    logger.error("yt-dlp not importable and not on PATH — `pip install yt-dlp`")
-    sys.exit(2)
-
-
-_YT_DLP = _yt_dlp_cmd()
-
-
-def _yt_dlp_check() -> None:
-    """Kept for backwards-compat with older invocations; _yt_dlp_cmd does the work now."""
-    pass
+        _YT_DLP_CACHE = [sys.executable, "-m", "yt_dlp"]
+    else:
+        binary = shutil.which("yt-dlp")
+        if binary:
+            _YT_DLP_CACHE = [binary]
+        else:
+            logger.error("yt-dlp not importable and not on PATH — `pip install yt-dlp`")
+            sys.exit(2)
+    return _YT_DLP_CACHE
 
 
 def fetch_metadata(url: str) -> dict:
     r = subprocess.run(
-        [*_YT_DLP, "-j", "--skip-download", url],
+        [*_yt_dlp_cmd(), "-j", "--skip-download", url],
         capture_output=True, text=True, timeout=60,
     )
     if r.returncode != 0:
@@ -75,7 +73,7 @@ def download_video(url: str, out_dir: Path, video_id: str) -> Path:
     """
     template = str(out_dir / "%(id)s.%(ext)s")
     r = subprocess.run(
-        [*_YT_DLP, "-f", "mp4/best", "-o", template, url],
+        [*_yt_dlp_cmd(), "-f", "mp4/best", "-o", template, url],
         capture_output=True, text=True, timeout=600,
     )
     if r.returncode != 0:
@@ -94,9 +92,31 @@ def already_downloaded(out_dir: Path, video_id: str) -> bool:
     return meta_ok and media_ok
 
 
+# Fields from yt-dlp's `-j` output that we actually want to persist. The raw output is
+# ~80KB per video (most of that is `formats`, a list of every codec/resolution variant
+# yt-dlp could have downloaded — irrelevant once the mp4 is on disk). This allowlist
+# trims to ~2-3KB per video while keeping every field the predictor or future analysis
+# would plausibly need.
+KEEP_META_FIELDS = {
+    "id", "webpage_url", "original_url", "channel_url", "uploader_url",
+    "view_count", "like_count", "comment_count",
+    "channel_follower_count", "uploader_subscriber_count",
+    "channel", "uploader", "channel_id", "uploader_id",
+    "duration", "width", "height", "fps", "aspect_ratio",
+    "title", "description", "tags", "categories",
+    "upload_date", "release_date", "release_timestamp", "timestamp",
+    "language", "age_limit", "live_status", "availability",
+    "extractor", "extractor_key",
+}
+
+
+def slim_metadata(meta: dict) -> dict:
+    return {k: meta[k] for k in KEEP_META_FIELDS if k in meta}
+
+
 def write_metadata(out_dir: Path, video_id: str, meta: dict) -> Path:
     p = out_dir / f"{video_id}.meta.json"
-    p.write_text(json.dumps(meta, indent=2), encoding="utf-8")
+    p.write_text(json.dumps(slim_metadata(meta), indent=2), encoding="utf-8")
     return p
 
 
@@ -110,7 +130,7 @@ def main() -> int:
     p.add_argument("--sleep", type=float, default=1.0, help="seconds between URLs (rate-limit kindness)")
     args = p.parse_args()
 
-    logger.info("using yt-dlp via: %s", " ".join(_YT_DLP))
+    logger.info("using yt-dlp via: %s", " ".join(_yt_dlp_cmd()))
 
     urls: list[str] = list(args.url)
     if args.urls_file:
