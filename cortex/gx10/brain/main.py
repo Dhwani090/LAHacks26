@@ -22,7 +22,15 @@ from . import config, curator as curator_mod, models, streaming
 from .cache import hero_cache
 from .corpus import corpus
 from .gemma import gemma_service
-from .library import LibraryEntry, filter_candidates, library_registry, now_iso, rank_similar
+from .library import (
+    LibraryEntry,
+    compute_centroid,
+    filter_candidates,
+    library_registry,
+    load_trending_pool,
+    now_iso,
+    rank_similar,
+)
 from .pooling import frames_to_array, pool_tribe_output, roi_mean_vector
 from .predictor import load_default_predictor, predictor
 from .text_embed import embed_text
@@ -530,6 +538,73 @@ async def similarity(req: models.SimilarityRequest) -> models.SimilarityResponse
         creator_id=req.creator_id,
         weighting={"brain": config.SIMILARITY_BRAIN_WEIGHT, "text": config.SIMILARITY_TEXT_WEIGHT},
         filter={"last_n": req.last_n, "since_days": req.since_days},
+    )
+
+
+@app.get("/inspiration/{creator_id}", response_model=models.InspirationResponse)
+async def inspiration(creator_id: str) -> models.InspirationResponse:
+    """Surface trending YouTube Shorts that match the creator's brain centroid (PRD §11.8).
+
+    Cold-start: library < SIMILARITY_MIN_LIBRARY_SIZE → empty + message.
+    Trending pool empty → empty + message (curator hasn't harvested yet)."""
+    import numpy as np
+
+    # Reuse library.py path-traversal regex via the registry's loader.
+    try:
+        library = library_registry.load_creator_library(creator_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+    trending_entries, trending_extras = load_trending_pool(config.CURATOR_TRENDING_DIR)
+
+    if len(library) < config.SIMILARITY_MIN_LIBRARY_SIZE:
+        return models.InspirationResponse(
+            recommendations=[],
+            library_size=len(library),
+            trending_pool_size=len(trending_entries),
+            creator_id=creator_id,
+            message=f"upload at least {config.SIMILARITY_MIN_LIBRARY_SIZE} past clips to enable inspiration feed",
+        )
+
+    if not trending_entries:
+        return models.InspirationResponse(
+            recommendations=[],
+            library_size=len(library),
+            trending_pool_size=0,
+            creator_id=creator_id,
+            message="trending pool not yet populated by curator — check back later",
+        )
+
+    centroid_brain, centroid_text, centroid_roi = compute_centroid(library)
+
+    matches = rank_similar(
+        draft_brain=centroid_brain,
+        draft_text=centroid_text,
+        draft_roi_means=centroid_roi,
+        library=trending_entries,
+        # Trending pool needs only ≥ 1 entry — the creator-library gate is upstream.
+        min_library=1,
+    )
+
+    return models.InspirationResponse(
+        recommendations=[
+            models.InspirationRecommendation(
+                video_id=m["video_id"],
+                score=m["score"],
+                thumbnail_url=m["thumbnail_url"],
+                source_url=trending_extras.get(m["video_id"], {}).get("source_url"),
+                uploaded_at=m["uploaded_at"],
+                creator_handle=trending_extras.get(m["video_id"], {}).get("creator_handle"),
+                view_count=trending_extras.get(m["video_id"], {}).get("view_count", 0),
+                engagement_rate=trending_extras.get(m["video_id"], {}).get("engagement_rate", 0.0),
+                dominant_roi=m["dominant_roi"],
+                roi_breakdown=models.RoiBreakdown(**m["roi_breakdown"]),
+            )
+            for m in matches
+        ],
+        library_size=len(library),
+        trending_pool_size=len(trending_entries),
+        creator_id=creator_id,
     )
 
 

@@ -150,13 +150,16 @@ def rank_similar(
     library: list[LibraryEntry],
     top_k: int = config.SIMILARITY_TOP_K,
     alpha: float = config.SIMILARITY_BRAIN_WEIGHT,
+    min_library: int = config.SIMILARITY_MIN_LIBRARY_SIZE,
 ) -> list[dict[str, Any]]:
     """Return top-K matches with score + per-ROI breakdown.
 
-    Cold-start gate: returns [] if library < SIMILARITY_MIN_LIBRARY_SIZE.
+    Cold-start gate: returns [] if `len(library) < min_library`.
+    Default `min_library` matches the §11.6 creator-library gate (5);
+    R-05 inspiration overrides to 1 so a sparse trending pool still ranks.
     Pure function — no side effects, no state.
     """
-    if len(library) < config.SIMILARITY_MIN_LIBRARY_SIZE:
+    if len(library) < min_library:
         return []
     if draft_brain.shape != (POOLED_DIM,):
         raise ValueError(f"draft_brain must be ({POOLED_DIM},), got {draft_brain.shape}")
@@ -248,3 +251,84 @@ def filter_candidates(
 
 
 library_registry = LibraryRegistry(root=config.CACHE_DIR / "library")
+
+
+# ---------------------------------------------------------------------------
+# R-05 — creator centroid + trending pool (PRD §11.8 inspiration feed).
+# ---------------------------------------------------------------------------
+
+
+def compute_centroid(
+    library: list[LibraryEntry],
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """L2-normalized mean of (tribe_pooled, text_embedding, roi_means) across
+    library entries. Used as the "draft" vectors for inspiration ranking.
+
+    Empty library → ValueError (caller must gate on len(library) ≥ MIN before
+    calling). All-zero edge case (degenerate corpus) returns the zero vector
+    instead of NaN — `_l2` falls through cleanly.
+    """
+    if not library:
+        raise ValueError("compute_centroid requires at least one library entry")
+    brain_mean = np.mean(
+        np.stack([e.tribe_pooled.astype(np.float32) for e in library]), axis=0
+    )
+    text_mean = np.mean(
+        np.stack([e.text_embedding.astype(np.float32) for e in library]), axis=0
+    )
+    roi_mean = np.mean(
+        np.stack([e.roi_means.astype(np.float32) for e in library]), axis=0
+    )
+    return _l2(brain_mean), _l2(text_mean), roi_mean
+
+
+def load_trending_pool(
+    trending_dir: Path,
+) -> tuple[list[LibraryEntry], dict[str, dict[str, Any]]]:
+    """Walk every cache/trending/<yyyy-mm-dd>/<id>.json, parse into LibraryEntry
+    instances, and surface trending-specific extras (`source_url`,
+    `creator_handle`, `view_count`, `engagement_rate`) keyed by `video_id`.
+
+    Returns ([], {}) for a missing dir. Entries with a missing or all-zero
+    `text_embedding` are skipped — they'd produce noise in the cosine fusion.
+    """
+    if not trending_dir.exists():
+        return [], {}
+    entries: list[LibraryEntry] = []
+    extras: dict[str, dict[str, Any]] = {}
+    for date_dir in sorted(trending_dir.iterdir()):
+        if not date_dir.is_dir():
+            continue
+        for json_path in sorted(date_dir.glob("*.json")):
+            try:
+                blob = json.loads(json_path.read_text(encoding="utf-8"))
+            except Exception as exc:
+                logger.error("trending entry parse failed %s: %s", json_path, exc)
+                continue
+            text_emb = blob.get("text_embedding")
+            if not isinstance(text_emb, list) or not text_emb:
+                continue
+            arr = np.asarray(text_emb, dtype=np.float32)
+            if not np.any(arr):
+                continue  # all-zero embedding (empty transcript) → noise
+            try:
+                entry = LibraryEntry.from_json(blob)
+            except Exception as exc:
+                logger.error("trending entry shape mismatch %s: %s", json_path, exc)
+                continue
+            # Hard shape gate — mixed dims would crash np.stack inside rank_similar.
+            if (
+                entry.tribe_pooled.shape != (POOLED_DIM,)
+                or entry.text_embedding.shape != (EMBED_DIM,)
+                or entry.roi_means.shape != (3,)
+            ):
+                logger.error("trending entry has wrong vector shapes %s — skipping", json_path)
+                continue
+            entries.append(entry)
+            extras[entry.video_id] = {
+                "source_url": blob.get("source_url"),
+                "creator_handle": blob.get("creator_handle"),
+                "view_count": int(blob.get("view_count") or 0),
+                "engagement_rate": float(blob.get("engagement_rate") or 0.0),
+            }
+    return entries, extras

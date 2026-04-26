@@ -158,6 +158,33 @@ class LibraryFromJobRequest(BaseModel):
     video_id: str | None = Field(default=None, max_length=128)
 
 
+class InspirationRecommendation(BaseModel):
+    """One trending Shorts match in the inspiration feed (PRD §11.8)."""
+    video_id: str
+    score: float
+    thumbnail_url: str | None = None
+    source_url: str | None = None
+    uploaded_at: str
+    creator_handle: str | None = None
+    view_count: int = 0
+    engagement_rate: float = 0.0
+    dominant_roi: Literal["visual", "auditory", "language"]
+    roi_breakdown: RoiBreakdown
+
+
+class InspirationResponse(BaseModel):
+    """Response shape for `GET /inspiration/{creator_id}` (PRD §11.8).
+
+    Cold-start (library < MIN or trending pool empty) → recommendations=[]
+    + a `message` describing what the creator must do."""
+    recommendations: list[InspirationRecommendation] = Field(default_factory=list)
+    library_size: int
+    trending_pool_size: int
+    creator_id: str
+    centroid_age_s: int = 0  # always-fresh; cache layer would change this
+    message: str | None = None
+
+
 class CuratorStatusResponse(BaseModel):
     """Status of the NemoClaw curator (PRD §11.7).
 
