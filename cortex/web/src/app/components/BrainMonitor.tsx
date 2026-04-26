@@ -179,7 +179,7 @@ export function BrainMonitor() {
     };
   }, []);
 
-  // Halo intensity follows mean activation. Breathing baseline is small (~±0.45z),
+  // Halo intensity follows mean activation. Breathing baseline is small (~±0.6z),
   // so the multipliers are tuned to make idle visibly alive without blowing out
   // peak (real-frame) activations.
   const cold = meanActivation < 0;
@@ -190,9 +190,13 @@ export function BrainMonitor() {
   const innerHalo = `rgba(${colorRGB},${innerAlpha.toFixed(3)})`;
   const outerHalo = `rgba(${colorRGB},${outerAlpha.toFixed(3)})`;
 
+  const playing = framesRef.current.length > 0 && playStartMsRef.current !== null;
+  const stateLabel = initError ? 'offline' : playing ? 'rendering' : 'idle';
+  const meterPct = Math.min(100, Math.abs(meanActivation) / 1.5 * 100);
+
   return (
     <div
-      className="relative h-full w-full"
+      className="relative h-full w-full overflow-hidden"
       style={{
         // Layered shadows: outer drop-glow + inner edge-glow. Idle breathing reads
         // as a slow pulse around the canvas; real activations pulse harder.
@@ -205,6 +209,56 @@ export function BrainMonitor() {
         className="h-full w-full"
         data-testid="brain-monitor-canvas"
       />
+
+      {/* Scanline overlay — adds a subtle "instrument" feel without obscuring detail.
+          Pure CSS, no extra render cost. */}
+      <div
+        aria-hidden
+        className="pointer-events-none absolute inset-0 opacity-[0.08]"
+        style={{
+          backgroundImage:
+            'repeating-linear-gradient(0deg, rgba(255,255,255,0.5) 0px, rgba(255,255,255,0.5) 1px, transparent 1px, transparent 3px)',
+          mixBlendMode: 'overlay',
+        }}
+      />
+
+      {/* Top-left status badge — names what the brain is doing right now. */}
+      <div className="pointer-events-none absolute left-4 top-4 flex items-center gap-2 rounded-full border border-white/10 bg-black/40 px-3 py-1 text-[10px] uppercase tracking-[0.22em] text-white/55 backdrop-blur-sm">
+        <span
+          className={`h-1.5 w-1.5 rounded-full ${
+            initError
+              ? 'bg-white/30'
+              : playing
+                ? 'animate-pulse bg-orange-400'
+                : 'bg-emerald-400/70'
+          }`}
+        />
+        {stateLabel}
+      </div>
+
+      {/* Top-right peak meter — vertical bar reading mean activation magnitude. */}
+      {!initError && (
+        <div className="pointer-events-none absolute right-4 top-4 flex items-center gap-2">
+          <div className="text-[10px] uppercase tracking-[0.22em] text-white/40">
+            peak
+          </div>
+          <div className="h-12 w-1 overflow-hidden rounded-full bg-white/10">
+            <div
+              className="h-full origin-bottom transition-transform duration-100 ease-out"
+              style={{
+                transform: `scaleY(${(meterPct / 100).toFixed(3)})`,
+                background: cold
+                  ? 'linear-gradient(to top, rgba(56,124,255,0.7), rgba(56,124,255,0.95))'
+                  : 'linear-gradient(to top, rgba(255,140,40,0.7), rgba(255,200,60,0.95))',
+              }}
+            />
+          </div>
+          <div className="w-8 text-right tabular-nums text-[10px] text-white/55">
+            {meanActivation.toFixed(2)}
+          </div>
+        </div>
+      )}
+
       {initError && (
         <div className="pointer-events-none absolute inset-0 flex flex-col items-center justify-center px-8 text-center">
           <div className="text-[10px] uppercase tracking-[0.28em] text-white/45">

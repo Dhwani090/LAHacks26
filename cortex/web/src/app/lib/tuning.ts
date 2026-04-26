@@ -9,8 +9,11 @@ export const TUNING = {
   IDLE_AZIMUTH_STEP_DEG: 0.15,
   INTERPOLATION_FPS: 30,
   TRIBE_FRAME_MS: 1000,
-  IDLE_BREATHE_HZ: 0.08,
-  IDLE_BREATHE_AMPLITUDE_Z: 0.45,
+  // Sharpened for the demo — the brain needs to read as "alive" from across
+  // the venue, not just up close. 0.15Hz ≈ 6.7s breathing cycle, fast enough
+  // to feel like a heartbeat without looking restless.
+  IDLE_BREATHE_HZ: 0.15,
+  IDLE_BREATHE_AMPLITUDE_Z: 0.6,
 
   // Activation colormap
   COLD_THRESHOLD_Z: -0.5,

@@ -27,6 +27,8 @@ export interface HealthResponse {
   status: 'ok' | 'degraded' | 'loading';
   tribe_loaded: boolean;
   gemma_loaded: boolean;
+  predictor_loaded?: boolean;
+  corpus_size?: number;
   cache_size: number;
   gx10_uptime_s: number;
 }
@@ -80,6 +82,25 @@ export const brainClient = {
     const fd = new FormData();
     fd.append('file', file);
     return postForm<JobAccepted>('/analyze/video', fd, signal);
+  },
+
+  analyzeHero(
+    slug: string,
+    mode: 'text' | 'audio' | 'video' = 'video',
+    signal?: AbortSignal,
+  ): Promise<JobAccepted> {
+    const fd = new FormData();
+    fd.append('slug', slug);
+    fd.append('mode', mode);
+    return postForm<JobAccepted>('/analyze/hero', fd, signal);
+  },
+
+  async listHeroes(
+    signal?: AbortSignal,
+  ): Promise<{ heroes: { mode: 'text' | 'audio' | 'video'; slug: string }[] }> {
+    const res = await fetch(url('/heroes'), { signal });
+    if (!res.ok) throw new BrainClientError(`/heroes → ${res.status}`);
+    return (await res.json()) as { heroes: { mode: 'text' | 'audio' | 'video'; slug: string }[] };
   },
 
   applySuggestion(
