@@ -533,12 +533,13 @@ These extend `P3-09 scraper-agent stub` into a real **NemoClaw active-learning c
 - **Verification:** `pytest tests/test_inspiration.py -v` → 12/12 pass (compute_centroid: empty/single/N-entry/zero-summing edge cases; load_trending_pool: missing dir/multi-partition walk/zero-text skip/malformed JSON skip/bad-shape skip; endpoint: cold-start library/empty trending/happy path with full shape/path traversal). Full suite: 102/102 pass.
 - **Notes for R-06:** response shape matches PRD §11.8 InspirationResponse contract exactly. Frontend `InspirationFeed.tsx` consumes `recommendations[]` (each with thumbnail, source_url, score, dominant_roi). Cold-start `message` field signals "hide section" to the UI. Add `getInspiration(creatorId)` to `web/src/app/lib/brainClient.ts` (parallels existing `predictSimilarity`).
 
-### R-06 · Frontend `InspirationFeed.tsx` on /library
+### R-06 · Frontend `InspirationFeed.tsx` on /library ✅
 - **References:** `@docs/PRD.md#§11.8`
-- **Files to create:** `cortex/web/src/app/components/InspirationFeed.tsx`
-- **Files to modify:** `cortex/web/src/app/library/page.tsx` (mount feed below the clips table), `cortex/web/src/app/lib/brainClient.ts` (add `getInspiration`), `cortex/web/src/app/lib/types.ts` (add `InspirationResponse`)
-- **Action:** 3 cards horizontally — thumbnail + dominant-ROI chip + score + outbound link (target=_blank). Hidden during cold-start. `onError` thumbnail fallback for deleted source videos.
-- **Verification:** `npm run typecheck && npm run build` clean. With stub backend returning 3 recs, `/library` shows the section with 3 cards. Library = 0 → section hidden.
+- **Files to create:** `cortex/web/src/app/components/InspirationFeed.tsx` (~165 lines, two components: `InspirationFeed` + `InspirationCard`) ✅
+- **Files to modify:** `cortex/web/src/app/library/page.tsx` (mounts `<InspirationFeed creatorId={DEMO_CREATOR_ID} />` below the clips table, gated on `ready` so it doesn't show during library cold-start) ✅; `cortex/web/src/app/lib/brainClient.ts` (added `getInspiration(creatorId)`) ✅; `cortex/web/src/app/lib/types.ts` (added `InspirationRecommendation` + `InspirationResponse` matching backend Pydantic shape) ✅
+- **Action:** auto-fetches `GET /inspiration/{DEMO_CREATOR_ID}` on mount via `useEffect` with `AbortController`. Three states: cold-start library (`message` contains "upload at least") → returns null (the `/library` header indicator handles UX); trending-empty → friendly dashed-border message; happy path → responsive grid (1 col mobile, 2 sm, 3 lg) of `InspirationCard`. Each card: 16:9 thumbnail with `onError` fallback to ROI-colored gradient (visual=violet, auditory=emerald, language=orange — matches BrainMonitor track colors), top-right score chip ("78% match"), bottom row with dominant-ROI chip + view count + creator handle + engagement %. Cards are `<a>` wrappers with `target="_blank" rel="noopener noreferrer"` to the source URL.
+- **Verification:** `npm run typecheck && npm run build` clean — `/library` route went from 3.x kB to 4.57 kB after the addition. Live probe with stub backend on :8088 (no trending pool yet): `GET /inspiration/demo` returns `InspirationResponse` matching the TS interface key-for-key (`recommendations`, `library_size`, `trending_pool_size`, `creator_id`, `centroid_age_s`, `message`).
+- **Manual GX10 verification (deferred):** start backend with stub flags + curl seed `cache/trending/<today>/*.json` files (or wait for the curator to harvest) → /library renders 3 cards with thumbnails. Click a card → opens the YouTube Shorts URL in a new tab. Force a 404 thumbnail (rename one mp4 ID in the trending JSON) → ROI-colored gradient fallback shows, no broken-image icon.
 
 ---
 

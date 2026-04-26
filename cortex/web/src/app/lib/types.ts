@@ -86,6 +86,28 @@ export interface SimilarityResponse {
   message?: string;
 }
 
+export interface InspirationRecommendation {
+  video_id: string;
+  score: number;
+  thumbnail_url: string | null;
+  source_url: string | null;
+  uploaded_at: string;
+  creator_handle: string | null;
+  view_count: number;
+  engagement_rate: number;
+  dominant_roi: RoiName;
+  roi_breakdown: RoiBreakdown;
+}
+
+export interface InspirationResponse {
+  recommendations: InspirationRecommendation[];
+  library_size: number;
+  trending_pool_size: number;
+  creator_id: string;
+  centroid_age_s: number;
+  message?: string | null;
+}
+
 export interface LibraryEntryMeta {
   video_id: string;
   uploaded_at: string;
