@@ -5,6 +5,7 @@
 # See docs/PRD.md §6 + skills/tribe-inference/SKILL.md.
 
 from __future__ import annotations
+import asyncio
 import logging
 import math
 import os
@@ -20,6 +21,13 @@ class TribeService:
     def __init__(self) -> None:
         self._model: Any | None = None
         self._loaded = False
+        # PRD §11.7 — both live `/stream/{job_id}` and the NemoClaw curator share
+        # this single TRIBE handle. PyTorch models are not thread-safe (shared
+        # CUDA streams + internal buffers), so all real inference must run inside
+        # `async with tribe_service.lock:` to serialize access. The R-01 priority
+        # gate makes contention rare; this lock plugs the race when a job arrives
+        # after the curator has passed the gate but before it called TRIBE.
+        self.lock = asyncio.Lock()
 
     def load(self) -> None:
         """Load TRIBE v2 + LLaMA + Wav2Vec + V-JEPA. Idempotent."""

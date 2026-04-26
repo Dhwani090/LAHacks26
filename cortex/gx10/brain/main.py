@@ -196,14 +196,17 @@ async def stream(job_id: str) -> EventSourceResponse:
             hero_payload = job.get("hero_payload")
             if hero_payload is not None:
                 result = hero_payload
-            elif mode == "text":
-                result = tribe_service.analyze_text(job["input"]["text"])
-            elif mode == "audio":
-                audio_path = job["input"].get("path") or "stub.wav"
-                result = tribe_service.analyze_audio(Path(audio_path))
             else:
-                path = Path(job["input"].get("path") or job["input"].get("hero_slug") or "stub.mp4")
-                result = tribe_service.analyze_video(path)
+                # Serialize TRIBE access — see TribeService.lock docstring.
+                async with tribe_service.lock:
+                    if mode == "text":
+                        result = tribe_service.analyze_text(job["input"]["text"])
+                    elif mode == "audio":
+                        audio_path = job["input"].get("path") or "stub.wav"
+                        result = tribe_service.analyze_audio(Path(audio_path))
+                    else:
+                        path = Path(job["input"].get("path") or job["input"].get("hero_slug") or "stub.mp4")
+                        result = tribe_service.analyze_video(path)
 
             if mode in ("audio", "video"):
                 yield streaming.transcript(result.get("transcript", []))
@@ -330,7 +333,8 @@ async def library_upload(
         f.write(await file.read())
 
     try:
-        result = tribe_service.analyze_video(tmp_path)
+        async with tribe_service.lock:
+            result = tribe_service.analyze_video(tmp_path)
         arr = frames_to_array(result["brain_frames"])
         pooled = pool_tribe_output(arr)
         roi_means = roi_mean_vector(arr)

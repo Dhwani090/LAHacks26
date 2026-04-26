@@ -67,3 +67,23 @@ CURATOR_TRENDING_QUERIES_PER_ITER = 1
 # from cache/curator_query_pool.jsonl (R-03 fills the pool, R-02 only reads it).
 CURATOR_QUERY_POOL_SAMPLE_RATE = 0.10
 CURATOR_QUERY_POOL_MAX_SIZE = 200
+# R-03: how many candidate URLs to actually pull + run TRIBE over per iteration.
+# 5 queries × ~3 URLs = ~15 cap; we keep budget low to avoid yt-dlp rate limits
+# and keep iteration time under the 30-60min budget on the GX10.
+CURATOR_URLS_PER_ITERATION = 15
+# Filter thresholds for ytsearch results before download.
+CURATOR_MIN_VIEWS = 1000
+# R²-rollback: if held-out R² drops by more than this, mark the rows excluded
+# and restore the prior pickle. PRD §11.7 step 6.
+CURATOR_R2_REGRESSION_THRESHOLD = 0.02
+# 80/20 split — matches scripts/fit_predictor.py default for consistency.
+CURATOR_REFIT_TEST_FRAC = 0.2
+CURATOR_REFIT_SEED = 0
+# Self-supervised query expansion gate — iteration must add ≥ this many rows AND
+# at least one row's engagement_rate must clear the threshold for Gemma to be
+# asked for query candidates.
+CURATOR_QUERY_EXPANSION_MIN_ROWS = 2
+CURATOR_QUERY_EXPANSION_MIN_RATE = 0.10
+# Subprocess timeouts for yt-dlp (seconds).
+CURATOR_YTSEARCH_TIMEOUT_S = 60
+CURATOR_DOWNLOAD_TIMEOUT_S = 300

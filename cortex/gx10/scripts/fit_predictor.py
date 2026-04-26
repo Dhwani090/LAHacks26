@@ -1,11 +1,15 @@
 #!/usr/bin/env python3
 """Fit the engagement predictor from corpus.jsonl.
 
-PRD §11.2 + .claude/skills/engagement-prediction/SKILL.md §"The model".
+PRD §11.2 + §11.7 + .claude/skills/engagement-prediction/SKILL.md §"The model".
 
-Read corpus → build (X, y) where X = [pooled_features ++ log(followers+1) ++ duration_s ++ n_cold_zones]
-and y = log(engagement_rate). Fit Ridge by default; --model can swap. 80/20 split,
+Read corpus → drop `excluded:true` rows → build (X, y) where
+X = [pooled_features ++ log(followers+1) ++ duration_s ++ n_cold_zones],
+y = log(engagement_rate). Fit Ridge by default; --model can swap. 80/20 split,
 deterministic seed. Print held-out R² and a sample-prediction table.
+
+Importable as `fit_predictor(...)` so the NemoClaw curator (PRD §11.7) can
+refit in-process and read back R² for the rollback decision.
 
 Usage:
     python scripts/fit_predictor.py
@@ -51,6 +55,10 @@ def _build_estimator(name: str) -> Any:
 
 
 def _row_to_xy(row: dict[str, Any]) -> tuple[np.ndarray, float] | None:
+    # PRD §11.7: rows the curator rejected on R² regression are kept on disk for
+    # the audit trail but skipped by the fitter. Same for any future hand-flagged bad rows.
+    if row.get("excluded") is True:
+        return None
     feats = row.get("tribe_features")
     rate = row.get("engagement_rate")
     followers = row.get("followers")
@@ -71,6 +79,92 @@ def _row_to_xy(row: dict[str, Any]) -> tuple[np.ndarray, float] | None:
     return x, float(np.log(rate))
 
 
+def fit_predictor(
+    corpus_path: Path,
+    out_path: Path,
+    model: str = "ridge",
+    seed: int = 0,
+    test_frac: float = 0.2,
+    metrics_path: Path | None = None,
+) -> dict[str, Any]:
+    """In-process fit. Returns `{n_rows, r2, mae, version, out_path}`.
+
+    Used by `scripts/fit_predictor.py main()` and by `brain.curator` for the
+    R-03 in-process refit + R²-rollback path. Raises ValueError on bad input
+    so the caller (curator) can rollback cleanly without parsing log strings.
+    """
+    if not corpus_path.exists():
+        raise ValueError(f"corpus not found: {corpus_path}")
+
+    rows = [json.loads(line) for line in corpus_path.read_text().splitlines() if line.strip()]
+    pairs = [pair for r in rows if (pair := _row_to_xy(r)) is not None]
+    if len(pairs) < 5:
+        raise ValueError(f"need at least 5 valid rows, got {len(pairs)}")
+
+    X = np.stack([p[0] for p in pairs])
+    y = np.asarray([p[1] for p in pairs], dtype=np.float32)
+    logger.info("dataset: n=%d, X=%s, y range=[%.3f, %.3f]", len(pairs), X.shape, y.min(), y.max())
+
+    rng = np.random.default_rng(seed)
+    perm = rng.permutation(len(pairs))
+    n_test = max(1, int(round(len(pairs) * test_frac)))
+    test_idx = perm[:n_test]
+    train_idx = perm[n_test:]
+
+    estimator = _build_estimator(model)
+    estimator.fit(X[train_idx], y[train_idx])
+    y_pred = estimator.predict(X[test_idx])
+    residuals = y[test_idx] - y_pred
+    ss_res = float(np.sum(residuals ** 2))
+    ss_tot = float(np.sum((y[test_idx] - y[test_idx].mean()) ** 2))
+    r2 = 1.0 - ss_res / ss_tot if ss_tot > 0 else float("nan")
+    mae = float(np.mean(np.abs(residuals)))
+
+    version = f"v0-{model}-{datetime.now(timezone.utc).strftime('%Y-%m-%d')}"
+    predictor = EngagementPredictor(model=estimator, version=version)
+    predictor.r2 = r2 if np.isfinite(r2) else None
+    predictor.save(out_path)
+    logger.info("wrote %s (version=%s, r2=%.4f)", out_path, version, r2)
+
+    if metrics_path is not None:
+        metrics_path.parent.mkdir(parents=True, exist_ok=True)
+        sample_lines = []
+        for i in test_idx[: min(5, n_test)]:
+            true_rate = float(np.exp(y[i]))
+            pred_rate = float(np.exp(estimator.predict(X[i:i + 1])[0]))
+            sample_lines.append(f"| {i} | {true_rate:.4f} | {pred_rate:.4f} | {pred_rate / true_rate:.2f}× |")
+        metrics_path.write_text(
+            "\n".join([
+                f"# predictor_metrics.md",
+                "",
+                f"- version: `{version}`",
+                f"- model: `{model}`",
+                f"- corpus path: `{corpus_path}`",
+                f"- N rows: {len(pairs)}",
+                f"- test fraction: {test_frac} (n_test={n_test})",
+                f"- held-out R²: **{r2:.4f}**",
+                f"- held-out MAE (log-rate space): {mae:.4f}",
+                "",
+                "## sample held-out predictions (rate space)",
+                "",
+                "| idx | true | predicted | ratio |",
+                "|---|---|---|---|",
+                *sample_lines,
+                "",
+            ]) + "\n",
+            encoding="utf-8",
+        )
+        logger.info("metrics written → %s", metrics_path)
+
+    return {
+        "n_rows": len(pairs),
+        "r2": r2,
+        "mae": mae,
+        "version": version,
+        "out_path": str(out_path),
+    }
+
+
 def main() -> int:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     p = argparse.ArgumentParser(description=__doc__.split("\n", 1)[0])
@@ -82,69 +176,19 @@ def main() -> int:
     p.add_argument("--test-frac", type=float, default=0.2)
     args = p.parse_args()
 
-    if not args.corpus.exists():
-        logger.error("corpus not found: %s", args.corpus)
+    try:
+        out = fit_predictor(
+            corpus_path=args.corpus,
+            out_path=args.out,
+            model=args.model,
+            seed=args.seed,
+            test_frac=args.test_frac,
+            metrics_path=args.metrics,
+        )
+    except ValueError as exc:
+        logger.error("%s", exc)
         return 1
-
-    rows = [json.loads(l) for l in args.corpus.read_text().splitlines() if l.strip()]
-    pairs = [pair for r in rows if (pair := _row_to_xy(r)) is not None]
-    if len(pairs) < 5:
-        logger.error("need at least 5 valid rows, got %d", len(pairs))
-        return 1
-
-    X = np.stack([p[0] for p in pairs])
-    y = np.asarray([p[1] for p in pairs], dtype=np.float32)
-    logger.info("dataset: n=%d, X=%s, y range=[%.3f, %.3f]", len(pairs), X.shape, y.min(), y.max())
-
-    rng = np.random.default_rng(args.seed)
-    perm = rng.permutation(len(pairs))
-    n_test = max(1, int(round(len(pairs) * args.test_frac)))
-    test_idx = perm[:n_test]
-    train_idx = perm[n_test:]
-
-    model = _build_estimator(args.model)
-    model.fit(X[train_idx], y[train_idx])
-    y_pred = model.predict(X[test_idx])
-    residuals = y[test_idx] - y_pred
-    ss_res = float(np.sum(residuals ** 2))
-    ss_tot = float(np.sum((y[test_idx] - y[test_idx].mean()) ** 2))
-    r2 = 1.0 - ss_res / ss_tot if ss_tot > 0 else float("nan")
-    mae = float(np.mean(np.abs(residuals)))
-
-    version = f"v0-{args.model}-{datetime.now(timezone.utc).strftime('%Y-%m-%d')}"
-    predictor = EngagementPredictor(model=model, version=version)
-    predictor.save(args.out)
-    logger.info("wrote %s (version=%s)", args.out, version)
-
-    args.metrics.parent.mkdir(parents=True, exist_ok=True)
-    sample_lines = []
-    for i in test_idx[: min(5, n_test)]:
-        true_rate = float(np.exp(y[i]))
-        pred_rate = float(np.exp(model.predict(X[i:i + 1])[0]))
-        sample_lines.append(f"| {i} | {true_rate:.4f} | {pred_rate:.4f} | {pred_rate / true_rate:.2f}× |")
-    args.metrics.write_text(
-        "\n".join([
-            f"# predictor_metrics.md",
-            "",
-            f"- version: `{version}`",
-            f"- model: `{args.model}`",
-            f"- corpus path: `{args.corpus}`",
-            f"- N rows: {len(pairs)}",
-            f"- test fraction: {args.test_frac} (n_test={n_test})",
-            f"- held-out R²: **{r2:.4f}**",
-            f"- held-out MAE (log-rate space): {mae:.4f}",
-            "",
-            "## sample held-out predictions (rate space)",
-            "",
-            "| idx | true | predicted | ratio |",
-            "|---|---|---|---|",
-            *sample_lines,
-            "",
-        ]) + "\n",
-        encoding="utf-8",
-    )
-    logger.info("metrics written → %s", args.metrics)
-    print(f"R² = {r2:.4f}  MAE(log) = {mae:.4f}  N={len(pairs)}")
+    print(f"R² = {out['r2']:.4f}  MAE(log) = {out['mae']:.4f}  N={out['n_rows']}")
     return 0
 
 
