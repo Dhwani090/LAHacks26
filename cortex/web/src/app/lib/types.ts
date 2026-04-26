@@ -79,8 +79,10 @@ export interface SimilarityMatch {
 export interface SimilarityResponse {
   matches: SimilarityMatch[];
   library_size: number;
+  candidate_size: number;
   creator_id: string;
   weighting?: { brain: number; text: number };
+  filter?: { last_n: number | null; since_days: number | null };
   message?: string;
 }
 

@@ -22,7 +22,7 @@ from . import config, models, streaming
 from .cache import hero_cache
 from .corpus import corpus
 from .gemma import gemma_service
-from .library import LibraryEntry, library_registry, now_iso, rank_similar
+from .library import LibraryEntry, filter_candidates, library_registry, now_iso, rank_similar
 from .pooling import frames_to_array, pool_tribe_output, roi_mean_vector
 from .predictor import load_default_predictor, predictor
 from .text_embed import embed_text
@@ -426,8 +426,26 @@ async def similarity(req: models.SimilarityRequest) -> models.SimilarityResponse
         return models.SimilarityResponse(
             matches=[],
             library_size=len(library),
+            candidate_size=0,
             creator_id=req.creator_id,
             message=f"upload at least {config.SIMILARITY_MIN_LIBRARY_SIZE} past clips to enable originality search",
+        )
+
+    candidates = filter_candidates(
+        library,
+        last_n=req.last_n,
+        since_days=req.since_days,
+    )
+    if len(candidates) < config.SIMILARITY_MIN_LIBRARY_SIZE:
+        # Filter narrowed the set below the cold-start threshold — tell the
+        # creator instead of returning a noisy ranking over 1-2 clips.
+        return models.SimilarityResponse(
+            matches=[],
+            library_size=len(library),
+            candidate_size=len(candidates),
+            creator_id=req.creator_id,
+            filter={"last_n": req.last_n, "since_days": req.since_days},
+            message=f"only {len(candidates)} clip(s) match your filter — widen the window or upload more",
         )
 
     text_emb = job.get("text_embedding")
@@ -441,7 +459,7 @@ async def similarity(req: models.SimilarityRequest) -> models.SimilarityResponse
         draft_brain=np.asarray(pooled, dtype=np.float32),
         draft_text=draft_text,
         draft_roi_means=np.asarray(roi_means, dtype=np.float32),
-        library=library,
+        library=candidates,
     )
     return models.SimilarityResponse(
         matches=[
@@ -458,6 +476,8 @@ async def similarity(req: models.SimilarityRequest) -> models.SimilarityResponse
             for m in matches
         ],
         library_size=len(library),
+        candidate_size=len(candidates),
         creator_id=req.creator_id,
         weighting={"brain": config.SIMILARITY_BRAIN_WEIGHT, "text": config.SIMILARITY_TEXT_WEIGHT},
+        filter={"last_n": req.last_n, "since_days": req.since_days},
     )

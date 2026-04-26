@@ -16,10 +16,13 @@ os.environ.setdefault("CORTEX_STUB_TRIBE", "1")
 os.environ.setdefault("CORTEX_STUB_TRANSCRIBE", "1")
 os.environ.setdefault("CORTEX_STUB_EMBED", "1")
 
+from datetime import datetime, timedelta, timezone  # noqa: E402
+
 from brain import config  # noqa: E402
 from brain.library import (  # noqa: E402
     LibraryEntry,
     LibraryRegistry,
+    filter_candidates,
     now_iso,
     per_roi_similarity,
     rank_similar,
@@ -148,3 +151,69 @@ def test_per_roi_similarity_identity():
     # Identity gives the unit vector squared per axis but normalized: each (a*a)/(|v|^2).
     total = sum(sims.values())
     assert abs(total - 1.0) < 1e-4
+
+
+def _entry_at(seed: int, days_ago: float, video_id: str | None = None, now: datetime | None = None) -> LibraryEntry:
+    e = _make_entry(seed, video_id=video_id)
+    base = now or datetime.now(timezone.utc)
+    e.uploaded_at = (base - timedelta(days=days_ago)).isoformat(timespec="seconds")
+    return e
+
+
+def test_filter_candidates_default_caps_at_50():
+    library = [_entry_at(seed=i, days_ago=i, video_id=f"v_{i:03d}") for i in range(120)]
+    out = filter_candidates(library, last_n=50)
+    assert len(out) == 50
+    # Newest-first: v_000 (0 days ago) should be first, v_049 last.
+    assert out[0].video_id == "v_000"
+    assert out[-1].video_id == "v_049"
+
+
+def test_filter_candidates_last_n_smaller_than_library():
+    library = [_entry_at(seed=i, days_ago=i, video_id=f"v_{i:03d}") for i in range(20)]
+    out = filter_candidates(library, last_n=5)
+    assert [e.video_id for e in out] == ["v_000", "v_001", "v_002", "v_003", "v_004"]
+
+
+def test_filter_candidates_since_days_only():
+    now = datetime(2026, 4, 25, tzinfo=timezone.utc)
+    library = [
+        _entry_at(seed=1, days_ago=2, video_id="recent_a", now=now),
+        _entry_at(seed=2, days_ago=5, video_id="recent_b", now=now),
+        _entry_at(seed=3, days_ago=15, video_id="old_a", now=now),
+        _entry_at(seed=4, days_ago=400, video_id="ancient", now=now),
+    ]
+    # Last week: only entries within 7 days.
+    out = filter_candidates(library, last_n=None, since_days=7, now=now)
+    assert {e.video_id for e in out} == {"recent_a", "recent_b"}
+    # Last 3 months (~90 days): excludes ancient only.
+    out = filter_candidates(library, last_n=None, since_days=90, now=now)
+    assert {e.video_id for e in out} == {"recent_a", "recent_b", "old_a"}
+
+
+def test_filter_candidates_since_days_then_last_n():
+    now = datetime(2026, 4, 25, tzinfo=timezone.utc)
+    library = [_entry_at(seed=i, days_ago=i, video_id=f"v_{i:02d}", now=now) for i in range(60)]
+    # Past month (~30 days), capped to last 5.
+    out = filter_candidates(library, last_n=5, since_days=30, now=now)
+    assert len(out) == 5
+    assert [e.video_id for e in out] == ["v_00", "v_01", "v_02", "v_03", "v_04"]
+
+
+def test_filter_candidates_no_caps_returns_all():
+    library = [_entry_at(seed=i, days_ago=i, video_id=f"v_{i:02d}") for i in range(10)]
+    # last_n=None and last_n=0 both mean "no cap"; since_days=None → no time filter.
+    assert len(filter_candidates(library, last_n=None, since_days=None)) == 10
+    assert len(filter_candidates(library, last_n=0, since_days=None)) == 10
+
+
+def test_filter_candidates_keeps_unparseable_when_no_time_filter():
+    e = _make_entry(1, video_id="bad_iso")
+    e.uploaded_at = "not a date"
+    library = [e, _entry_at(seed=2, days_ago=1, video_id="good")]
+    # No time filter → unparseable kept (sorted to tail).
+    out = filter_candidates(library, last_n=None)
+    assert {x.video_id for x in out} == {"bad_iso", "good"}
+    # With time filter → unparseable dropped (can't decide).
+    out = filter_candidates(library, last_n=None, since_days=7)
+    assert {x.video_id for x in out} == {"good"}

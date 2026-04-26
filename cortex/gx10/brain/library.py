@@ -179,4 +179,52 @@ def now_iso() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
+def _parse_iso(s: str) -> datetime | None:
+    """Tolerant ISO-8601 parser. Library entries always carry timezone-aware
+    timestamps written by `now_iso`, but if a hand-edited file slips through
+    we don't want one bad row to crash the whole rank."""
+    try:
+        # `fromisoformat` accepts the "+00:00" form Python emits; trailing 'Z'
+        # is rejected pre-3.11 and supported on 3.11+, so normalize here too.
+        return datetime.fromisoformat(s.replace("Z", "+00:00"))
+    except Exception:
+        return None
+
+
+def filter_candidates(
+    library: list[LibraryEntry],
+    last_n: int | None = 50,
+    since_days: int | None = None,
+    now: datetime | None = None,
+) -> list[LibraryEntry]:
+    """Slice the library down to the candidate set the user wants to compare against.
+
+    Order of operations:
+      1. Sort by uploaded_at DESC (newest first).
+      2. If `since_days` is set, drop entries older than that.
+      3. If `last_n` is a positive int, take the first N.
+
+    Returns a new list — never mutates the input. Library entries with
+    unparseable `uploaded_at` are kept (rather than silently dropped) when
+    no time filter is active, and excluded only when since_days requires it.
+    """
+    sortable: list[tuple[datetime | None, LibraryEntry]] = [
+        (_parse_iso(e.uploaded_at), e) for e in library
+    ]
+    # Sort: parseable entries newest-first, unparseable at the tail.
+    sortable.sort(
+        key=lambda t: (t[0] is None, -(t[0].timestamp() if t[0] else 0))
+    )
+
+    if since_days is not None:
+        cutoff_now = now or datetime.now(timezone.utc)
+        cutoff = cutoff_now.timestamp() - since_days * 86400.0
+        sortable = [(d, e) for (d, e) in sortable if d is not None and d.timestamp() >= cutoff]
+
+    out = [e for (_d, e) in sortable]
+    if last_n is not None and last_n > 0:
+        out = out[:last_n]
+    return out
+
+
 library_registry = LibraryRegistry(root=config.CACHE_DIR / "library")

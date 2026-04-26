@@ -152,6 +152,54 @@ def test_similarity_after_5_uploads_returns_top_matches(client, tmp_path):
     assert len(dominants) >= 1
 
 
+def test_similarity_filter_last_n_narrows_candidate_size(client, tmp_path):
+    library_registry.root = tmp_path / "library"
+    library_registry.reset()
+    creator = "filter_user"
+    for i in range(8):
+        _upload_library_clip(client, creator, f"clip_{i}.mp4")
+
+    job_id = _video_job_completed(client, name="fresh.mp4")
+
+    # No filter (default last_n=50, library has 8) → all 8 are candidates.
+    r = client.post("/similarity", json={"job_id": job_id, "creator_id": creator})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["library_size"] == 8
+    assert body["candidate_size"] == 8
+
+    # Cap to last 6 → candidate_size drops, library_size stays.
+    r = client.post(
+        "/similarity",
+        json={"job_id": job_id, "creator_id": creator, "last_n": 6},
+    )
+    body = r.json()
+    assert body["library_size"] == 8
+    assert body["candidate_size"] == 6
+    assert body["filter"] == {"last_n": 6, "since_days": None}
+
+
+def test_similarity_filter_under_min_returns_widen_message(client, tmp_path):
+    library_registry.root = tmp_path / "library"
+    library_registry.reset()
+    creator = "narrow_filter"
+    for i in range(7):
+        _upload_library_clip(client, creator, f"c_{i}.mp4")
+
+    job_id = _video_job_completed(client, name="fresh.mp4")
+    # last_n=2 forces candidate set below SIMILARITY_MIN_LIBRARY_SIZE (5).
+    r = client.post(
+        "/similarity",
+        json={"job_id": job_id, "creator_id": creator, "last_n": 2},
+    )
+    assert r.status_code == 200
+    body = r.json()
+    assert body["matches"] == []
+    assert body["library_size"] == 7
+    assert body["candidate_size"] == 2
+    assert "widen" in (body.get("message") or "").lower()
+
+
 def test_similarity_rejects_unknown_job(client):
     r = client.post("/similarity", json={"job_id": "no-such-job", "creator_id": "x"})
     assert r.status_code == 404

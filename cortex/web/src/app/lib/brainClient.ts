@@ -159,9 +159,18 @@ export const brainClient = {
   predictSimilarity(
     jobId: string,
     creatorId: string,
+    opts?: { lastN?: number | null; sinceDays?: number | null },
     signal?: AbortSignal,
   ): Promise<SimilarityResponse> {
-    return postJson<SimilarityResponse>('/similarity', { job_id: jobId, creator_id: creatorId }, signal);
+    const body: {
+      job_id: string;
+      creator_id: string;
+      last_n?: number | null;
+      since_days?: number | null;
+    } = { job_id: jobId, creator_id: creatorId };
+    if (opts?.lastN !== undefined) body.last_n = opts.lastN;
+    if (opts?.sinceDays !== undefined) body.since_days = opts.sinceDays;
+    return postJson<SimilarityResponse>('/similarity', body, signal);
   },
 
   resolveCacheUrl(pathOrUrl: string): string {
