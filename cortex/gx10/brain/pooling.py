@@ -1,7 +1,8 @@
 # TRIBE feature pooling — (T, 20484) z-scored BOLD → fixed ~25-dim vector.
 # PRD §8.3 + skills/engagement-prediction/SKILL.md.
 # Pure deterministic function; column order is load-bearing for the fitted predictor pickle.
-# ROI indices come from cortexlab.data.rois.get_hcp_roi_indices() on the GX10;
+# ROI indices come from cortexlab.data.loader.get_hcp_labels() on the GX10
+# (HCP-MMP1.0 atlas, 181 labels covering all 20484 fsaverage5 vertices);
 # a deterministic stub partition is used in laptop dev where cortexlab isn't installed.
 # See .claude/skills/engagement-prediction/SKILL.md.
 
@@ -16,11 +17,34 @@ from . import config
 logger = logging.getLogger(__name__)
 
 
-# ROI groupings per .claude/skills/tribe-inference/SKILL.md §"Output processing".
+# ROI groupings — HCP-MMP1.0 atlas labels, mirroring Meta's own canonical groupings
+# in cortexlab.analysis.cognitive_load.COGNITIVE_ROI_MAP. The skill files use simplified
+# umbrella names ("Broca", "MT_complex"); those don't exist as HCP labels, so we list
+# the real constituent areas here. Group keys ("visual" / "auditory" / "language") are
+# load-bearing — they index into FEATURE_COLUMNS below and the predictor pickle.
 ROI_GROUPS: dict[str, list[str]] = {
-    "visual":   ["V1", "V2", "MT_complex", "LO", "FG"],
-    "auditory": ["A1", "auditory_belt", "STS_dorsal", "STS_ventral"],
-    "language": ["IFG", "STG", "MTG_anterior", "Broca", "Wernicke"],
+    # Early visual + ventral object stream + dorsal/motion (≈ visual_complexity).
+    "visual": [
+        "V1", "V2", "V3", "V4",
+        "FFC", "VVC", "VMV1", "VMV2", "VMV3",
+        "PHA1", "PHA2", "PHA3",
+        "V3A", "V3B", "V6", "V6A", "V7",
+        "MT", "MST", "FST", "V4t",
+    ],
+    # Primary auditory + belt + STS (≈ auditory_demand).
+    "auditory": [
+        "A1", "LBelt", "MBelt", "PBelt", "RI",
+        "A4", "A5",
+        "STSdp", "STSda", "STSvp", "STSva", "TA2",
+    ],
+    # IFG (Broca proper = areas 44/45) + posterior temporal (Wernicke proper = TPOJ/PSL/STV)
+    # + angular gyrus + temporal pole (≈ language_processing).
+    "language": [
+        "44", "45", "IFJa", "IFJp", "IFSp", "IFSa",
+        "TPOJ1", "TPOJ2", "TPOJ3", "STV", "PSL",
+        "PGi", "PGs", "PFm",
+        "TGd", "TGv", "TE1a", "TE1p", "TE2a", "TE2p",
+    ],
 }
 
 # Fixed feature column names. The fitted predictor pickle is column-position-sensitive,
@@ -53,18 +77,28 @@ def _stub_roi_indices(seed: int = 0) -> dict[str, np.ndarray]:
 
 
 def _load_real_roi_indices() -> dict[str, np.ndarray] | None:
-    """Try to load the real cortexlab ROI mapping. Returns None if unavailable."""
+    """Try to load the real cortexlab HCP-MMP1.0 ROI mapping. Returns None if unavailable.
+
+    First call may download the parcellation via MNE (~ a few MB, cached after).
+    """
     try:
-        from cortexlab.data.rois import get_hcp_roi_indices  # type: ignore
+        from cortexlab.data.loader import get_hcp_labels  # type: ignore
     except Exception as exc:
         logger.warning("cortexlab not available — falling back to stub ROI indices: %s", exc)
         return None
     try:
-        raw = get_hcp_roi_indices()
-        return {name: np.asarray(idx, dtype=np.int64) for name, idx in raw.items()}
+        raw = get_hcp_labels(mesh="fsaverage5", combine=False, hemi="both")
     except Exception as exc:
-        logger.error("get_hcp_roi_indices() failed: %s", exc)
+        logger.error("get_hcp_labels() failed: %s", exc)
         return None
+    indices = {name: np.asarray(idx, dtype=np.int64) for name, idx in raw.items()}
+    needed = {r for regions in ROI_GROUPS.values() for r in regions}
+    missing = needed - set(indices.keys())
+    if missing:
+        # Some HCP names changed across atlas revisions; we'd rather know than silently
+        # average over fewer regions than intended.
+        logger.warning("HCP labels missing from cortexlab atlas: %s", sorted(missing))
+    return indices
 
 
 _ROI_INDICES: dict[str, np.ndarray] | None = None

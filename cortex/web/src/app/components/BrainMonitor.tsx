@@ -8,7 +8,7 @@
 // Patterns: see .claude/skills/niivue-rendering/SKILL.md.
 'use client';
 
-import { Niivue } from '@niivue/niivue';
+import { Niivue, NVMesh } from '@niivue/niivue';
 import { useEffect, useRef, useState } from 'react';
 import { activationToVertexColors } from '../lib/colormap';
 import { frameBus } from '../lib/frameBus';
@@ -31,6 +31,10 @@ const REGION_COPY: Record<string, { label: string; tone: string }> = {
   language: { label: 'language network active', tone: '#fb923c' },// orange
 };
 
+// Niivue ships the LH ICBM152 mesh only — there is no RH counterpart hosted
+// anywhere niivue or kitware publishes. We mirror the LH at load-time to
+// synthesize an RH; ICBM152 is sagittally near-symmetric so the mirror reads
+// as a proper full brain to a non-anatomist judge.
 const MESH_URLS = [
   'https://niivue.com/demos/images/BrainMesh_ICBM152.lh.mz3',
 ];
@@ -42,9 +46,14 @@ export function BrainMonitor() {
   const framesRef = useRef<BrainFrame[]>([]);
   const playStartMsRef = useRef<number | null>(null);
   const tickTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  // Persisted across ticks: the activation we actually painted last frame.
+  // Each new tick lerps toward the freshly-interpolated TRIBE values, which
+  // turns the per-frame jitter into smooth flowing waves of activation.
+  const displayedRef = useRef<Float32Array | null>(null);
   const engagementCurvesRef = useRef<EngagementCurves>({});
   const lastLabelMsRef = useRef<number>(0);
   const [meanActivation, setMeanActivation] = useState(0);
+  const [playT, setPlayT] = useState<number | null>(null);
   const [activeRegion, setActiveRegion] = useState<string | null>(null);
   const [initError, setInitError] = useState<string | null>(null);
 
@@ -93,24 +102,128 @@ export function BrainMonitor() {
       }
       if (cancelled || !nvRef.current) return;
 
-      const mesh = nv.meshes[0];
-      // Prefer pts (vertex positions) — niivue's rgba255 may be a 1-vertex default
-      // color rather than a per-vertex array, in which case it lies about vert count
-      // and the breathing/playback loop sees targetLen=1 and never paints anything.
-      const ptsCount = mesh?.pts ? Math.floor(mesh.pts.length / 3) : 0;
-      const rgbaCount = mesh?.rgba255 ? Math.floor(mesh.rgba255.length / 4) : 0;
-      meshVertCountRef.current = ptsCount > 0 ? ptsCount : rgbaCount;
+      // Synthesize the RH by mirroring the LH across the sagittal plane (X axis).
+      // Triangle winding flips under reflection, so we also reverse winding so
+      // the RH faces shade with outward normals (otherwise it renders inside-out
+      // and looks like a hole instead of a hemisphere).
+      try {
+        const lh = nv.meshes[0];
+        const lhPts = (lh as { pts?: Float32Array }).pts;
+        const lhTris = (lh as { tris?: Uint32Array }).tris;
+        const gl = (nv as unknown as { gl?: WebGL2RenderingContext }).gl;
+        if (lhPts && lhTris && gl) {
+          const rhPts = new Float32Array(lhPts);
+          for (let i = 0; i < rhPts.length; i += 3) rhPts[i] = -rhPts[i];
+          const rhTris = new Uint32Array(lhTris.length);
+          for (let i = 0; i < lhTris.length; i += 3) {
+            rhTris[i] = lhTris[i];
+            rhTris[i + 1] = lhTris[i + 2];
+            rhTris[i + 2] = lhTris[i + 1];
+          }
+          const rhRgba = new Uint8Array((rhPts.length / 3) * 4).fill(180);
+          const rh = new NVMesh(rhPts, rhTris, 'rh-mirror', rhRgba, 1.0, true, gl);
+          nv.meshes.push(rh);
+        }
+      } catch (err) {
+        console.warn('[BrainMonitor] RH mirror failed', err);
+      }
+
+      // Build a per-mesh vertex-count table so we can paint LH and RH from the
+      // same TRIBE activation vector. We stride-sample the TRIBE vector across
+      // the combined brain and slice out each mesh's chunk.
+      const meshVertCounts: number[] = [];
+      for (const m of nv.meshes) {
+        const pts = (m as { pts?: Float32Array }).pts;
+        const ptsN = pts ? Math.floor(pts.length / 3) : 0;
+        const rgbaN = m?.rgba255 ? Math.floor(m.rgba255.length / 4) : 0;
+        const n = ptsN > 0 ? ptsN : rgbaN;
+        meshVertCounts.push(n);
+        if (n > 0) {
+          const want = n * 4;
+          if (!m.rgba255 || m.rgba255.length !== want) {
+            m.rgba255 = new Uint8Array(want).fill(180);
+          }
+        }
+      }
+      const totalVerts = meshVertCounts.reduce((a, b) => a + b, 0);
+      meshVertCountRef.current = totalVerts;
+
+      // Build vertex adjacency on the combined LH+RH mesh so we can do
+      // graph-Laplacian-style smoothing. Without this, thresholding the per-
+      // vertex activation looks like speckled noise; with 3-4 smoothing iters
+      // the same activation field reads as growing/shrinking heat pools.
+      const adjacencyOffsets = new Uint32Array(totalVerts + 1);
+      let neighborCount = 0;
+      const sets: Set<number>[] = Array.from({ length: totalVerts }, () => new Set());
+      let baseOffset = 0;
+      for (let mi = 0; mi < nv.meshes.length; mi++) {
+        const mesh = nv.meshes[mi];
+        const tris = (mesh as { tris?: Uint32Array }).tris;
+        const n = meshVertCounts[mi];
+        if (tris && n > 0) {
+          for (let i = 0; i < tris.length; i += 3) {
+            const a = tris[i] + baseOffset;
+            const b = tris[i + 1] + baseOffset;
+            const c = tris[i + 2] + baseOffset;
+            if (a < totalVerts && b < totalVerts && c < totalVerts) {
+              sets[a].add(b); sets[a].add(c);
+              sets[b].add(a); sets[b].add(c);
+              sets[c].add(a); sets[c].add(b);
+            }
+          }
+        }
+        baseOffset += n;
+      }
+      for (let v = 0; v < totalVerts; v++) neighborCount += sets[v].size;
+      const adjacencyData = new Uint32Array(neighborCount);
+      let cursor = 0;
+      for (let v = 0; v < totalVerts; v++) {
+        adjacencyOffsets[v] = cursor;
+        sets[v].forEach((nb) => {
+          adjacencyData[cursor++] = nb;
+        });
+      }
+      adjacencyOffsets[totalVerts] = cursor;
+      // Scratch buffer reused across smoothing iterations to avoid allocation
+      // pressure (this runs every tick).
+      const smoothScratch = new Float32Array(totalVerts);
+      const smoothInPlace = (buf: Float32Array, iters: number) => {
+        for (let it = 0; it < iters; it++) {
+          for (let v = 0; v < totalVerts; v++) {
+            const start = adjacencyOffsets[v];
+            const end = adjacencyOffsets[v + 1];
+            let sum = buf[v];
+            for (let k = start; k < end; k++) sum += buf[adjacencyData[k]];
+            smoothScratch[v] = sum / (1 + (end - start));
+          }
+          buf.set(smoothScratch);
+        }
+      };
       nv.setRenderAzimuthElevation(120, 15);
       nv.opts.dragMode = 0;
 
       const applyColors = (activation: ArrayLike<number>) => {
         try {
-          const mesh = nv.meshes[0];
-          const targetLen = meshVertCountRef.current;
-          if (mesh?.rgba255 && mesh.rgba255.length === targetLen * 4) {
-            mesh.rgba255.set(activationToVertexColors(activation));
-            nv.updateGLVolume();
+          const gl = (nv as unknown as { gl?: WebGL2RenderingContext }).gl;
+          if (!gl) return;
+          let cursor = 0;
+          for (let mi = 0; mi < nv.meshes.length; mi++) {
+            const mesh = nv.meshes[mi];
+            const n = meshVertCounts[mi];
+            if (!mesh?.rgba255 || mesh.rgba255.length !== n * 4) continue;
+            // Slice the global colors view for this mesh's vertices.
+            const slice =
+              activation instanceof Float32Array
+                ? activation.subarray(cursor, cursor + n)
+                : Array.from({ length: n }, (_, k) => activation[cursor + k]);
+            mesh.rgba255.set(activationToVertexColors(slice));
+            const mAny = mesh as unknown as {
+              updateMesh?: (gl: WebGL2RenderingContext) => void;
+            };
+            mAny.updateMesh?.(gl);
+            cursor += n;
           }
+          nv.drawScene();
         } catch (err) {
           if (process.env.NODE_ENV === 'development') {
             console.warn('[BrainMonitor] vertex color skip', err);
@@ -120,36 +233,57 @@ export function BrainMonitor() {
 
       const tick = () => {
         if (cancelled || !nvRef.current) return;
-        nv.scene.renderAzimuth =
-          (nv.scene.renderAzimuth + TUNING.IDLE_AZIMUTH_STEP_DEG) % 360;
 
         const frames = framesRef.current;
         const startMs = playStartMsRef.current;
         const targetLen = meshVertCountRef.current;
         const playing = frames.length > 0 && startMs !== null;
 
+        // Pause auto-rotation while a real activation is playing — the user is
+        // here to watch *which regions* light up, not to watch the brain spin.
+        if (!playing) {
+          nv.scene.renderAzimuth =
+            (nv.scene.renderAzimuth + TUNING.IDLE_AZIMUTH_STEP_DEG) % 360;
+        }
+
         if (playing && targetLen > 0) {
-          const elapsed = performance.now() - startMs!;
-          const exact = elapsed / TUNING.TRIBE_FRAME_MS;
+          // Loop the activation: once we hit the last frame, wrap back to the
+          // first so the judge can keep watching the dynamics. PLAYBACK_RATE<1
+          // stretches each TRIBE second over more wall-clock time.
+          const frameMs = TUNING.TRIBE_FRAME_MS / TUNING.PLAYBACK_RATE;
+          const loopMs = frames.length * frameMs;
+          const elapsed = (performance.now() - startMs!) % loopMs;
+          const exact = elapsed / frameMs;
           const i0 = Math.min(Math.floor(exact), frames.length - 1);
-          const i1 = Math.min(i0 + 1, frames.length - 1);
+          const i1 = (i0 + 1) % frames.length;
           const raw = Math.min(1, Math.max(0, exact - i0));
-          // Smoothstep easing (3t² − 2t³) — kills the linear-interp jolt between frames.
+          // Smoothstep (3t² − 2t³) — softens linear-interp jolt between frames.
           const t = raw * raw * (3 - 2 * raw);
 
           const a = frames[i0].activation;
           const b = frames[i1].activation;
-          const interp = new Float32Array(targetLen);
+          // Reuse a persistent buffer so the temporal EMA from the previous
+          // tick survives — that's what makes hotspots glide instead of flicker.
+          if (!displayedRef.current || displayedRef.current.length !== targetLen) {
+            displayedRef.current = new Float32Array(targetLen);
+          }
+          const displayed = displayedRef.current;
+          const blend = TUNING.TEMPORAL_BLEND;
           const stride = a.length / targetLen;
           let sum = 0;
           for (let v = 0; v < targetLen; v++) {
             const src = Math.min(a.length - 1, Math.floor(v * stride));
-            const value = a[src] * (1 - t) + b[src] * t;
-            interp[v] = value;
-            sum += value;
+            const fresh = a[src] * (1 - t) + b[src] * t;
+            const next = displayed[v] * (1 - blend) + fresh * blend;
+            displayed[v] = next;
+            sum += next;
           }
           setMeanActivation(sum / targetLen);
-          applyColors(interp);
+          setPlayT(exact);
+          // Spatial smoothing on the temporally-blended state — together they
+          // turn TRIBE's per-vertex z-scores into the "growing pool" heatmap.
+          smoothInPlace(displayed, TUNING.SPATIAL_SMOOTH_ITERS);
+          applyColors(displayed);
 
           // Region-name overlay: pull the per-ROI value at the current second
           // from engagement curves (arrives on `complete`). If the strongest
@@ -176,15 +310,6 @@ export function BrainMonitor() {
           } else if (nowMs - lastLabelMsRef.current > REGION_LABEL_HOLD_MS) {
             setActiveRegion((prev) => (prev === null ? prev : null));
           }
-
-          if (
-            i0 >= frames.length - 1 &&
-            elapsed > frames.length * TUNING.TRIBE_FRAME_MS + 500
-          ) {
-            // Drain into idle breathing.
-            framesRef.current = [];
-            playStartMsRef.current = null;
-          }
         } else if (targetLen > 0) {
           // Idle breathing: low-frequency global pulse so the brain looks alive
           // even before any analysis runs.
@@ -193,6 +318,7 @@ export function BrainMonitor() {
           const baseline = new Float32Array(targetLen);
           baseline.fill(phase);
           setMeanActivation(phase);
+          if (playT !== null) setPlayT(null);
           applyColors(baseline);
         } else {
           nv.drawScene();
@@ -223,7 +349,9 @@ export function BrainMonitor() {
     const unsubReset = frameBus.onReset(() => {
       framesRef.current = [];
       playStartMsRef.current = null;
+      displayedRef.current = null;
       setMeanActivation(0);
+      setPlayT(null);
     });
     return () => {
       unsubFrame();
@@ -231,16 +359,15 @@ export function BrainMonitor() {
     };
   }, []);
 
-  // Halo intensity follows mean activation. Breathing baseline is small (~±0.6z),
-  // so the multipliers are tuned to make idle visibly alive without blowing out
-  // peak (real-frame) activations.
-  const cold = meanActivation < 0;
-  const mag = Math.min(1, Math.abs(meanActivation) / 1.5);
-  const innerAlpha = cold ? 0.15 + mag * 0.55 : 0.2 + mag * 0.6;
-  const outerAlpha = cold ? 0.08 + mag * 0.32 : 0.1 + mag * 0.4;
-  const colorRGB = cold ? '56,124,255' : '255,140,40';
-  const innerHalo = `rgba(${colorRGB},${innerAlpha.toFixed(3)})`;
-  const outerHalo = `rgba(${colorRGB},${outerAlpha.toFixed(3)})`;
+  // Halo follows mean activation; warm-only palette to match the heatmap
+  // (red→yellow on gray cortex). Idle breathing reads as a soft red pulse.
+  // `cold` is kept (always false) so the peak-meter gradient below stays warm.
+  const cold = false;
+  const mag = Math.min(1, Math.max(0, meanActivation) / 1.5);
+  const innerAlpha = 0.18 + mag * 0.55;
+  const outerAlpha = 0.08 + mag * 0.35;
+  const innerHalo = `rgba(220,60,40,${innerAlpha.toFixed(3)})`;
+  const outerHalo = `rgba(255,180,60,${outerAlpha.toFixed(3)})`;
 
   const playing = framesRef.current.length > 0 && playStartMsRef.current !== null;
   const stateLabel = initError ? 'offline' : playing ? 'rendering' : 'idle';
@@ -295,7 +422,8 @@ export function BrainMonitor() {
         </div>
       )}
 
-      {/* Top-left status badge — names what the brain is doing right now. */}
+      {/* Top-left status badge — names what the brain is doing right now,
+          plus the loop timestamp during playback. */}
       <div className="pointer-events-none absolute left-4 top-4 flex items-center gap-2 rounded-full border border-white/10 bg-black/40 px-3 py-1 text-[10px] uppercase tracking-[0.22em] text-white/55 backdrop-blur-sm">
         <span
           className={`h-1.5 w-1.5 rounded-full ${
@@ -306,7 +434,10 @@ export function BrainMonitor() {
                 : 'bg-emerald-400/70'
           }`}
         />
-        {stateLabel}
+        <span>{stateLabel}</span>
+        {playT !== null && (
+          <span className="text-orange-200/80">· t = {playT.toFixed(1)}s</span>
+        )}
       </div>
 
       {/* Top-right peak meter — vertical bar reading mean activation magnitude. */}

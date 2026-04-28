@@ -35,7 +35,8 @@ from .pooling import frames_to_array, pool_tribe_output, roi_mean_vector
 from .predictor import load_default_predictor, predictor
 from .text_embed import embed_text
 from .transcribe import transcribe
-from .tribe import tribe_service
+from .tribe import MIN_TEXT_WORDS, TooShortInputError, tribe_service
+from . import video_cache
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -103,6 +104,12 @@ async def health() -> models.HealthResponse:
 
 @app.post("/analyze/text", response_model=models.JobAccepted)
 async def analyze_text(req: models.AnalyzeTextRequest) -> models.JobAccepted:
+    word_count = len(req.text.split())
+    if word_count < MIN_TEXT_WORDS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"text must be ≥ {MIN_TEXT_WORDS} words for TRIBE (got {word_count})",
+        )
     job_id = str(uuid.uuid4())
     _JOBS[job_id] = {"mode": "text", "input": {"text": req.text}}
     return models.JobAccepted(job_id=job_id, mode="text", estimated_ms=10_000)
@@ -132,18 +139,23 @@ async def analyze_video(
         tmp_path.parent.mkdir(parents=True, exist_ok=True)
         with tmp_path.open("wb") as f:
             f.write(await file.read())
+        digest = video_cache.file_sha256(tmp_path)
+        cached = video_cache.get(digest)
         _JOBS[job_id] = {
             "mode": "video",
-            "input": {"path": str(tmp_path)},
+            "input": {"path": str(tmp_path), "digest": digest},
             "source_name": file.filename or "draft.mp4",
+            "cached_result": cached,
         }
+        eta = 1_000 if cached is not None else 600_000
     else:
         _JOBS[job_id] = {
             "mode": "video",
             "input": {"cloudinary_public_id": cloudinary_public_id},
             "source_name": cloudinary_public_id or "draft",
         }
-    return models.JobAccepted(job_id=job_id, mode="video", estimated_ms=45_000)
+        eta = 600_000
+    return models.JobAccepted(job_id=job_id, mode="video", estimated_ms=eta)
 
 
 @app.get("/heroes")
@@ -198,23 +210,48 @@ async def stream(job_id: str) -> EventSourceResponse:
             budgets = {"text": config.TEXT_BUDGET_S, "audio": config.AUDIO_BUDGET_S, "video": config.VIDEO_BUDGET_S}
             yield streaming.started(mode=mode, estimated_ms=int(budgets[mode] * 1000))
 
-            # Hero replay: if the job carries a cached hero payload, surface it
-            # directly. Falls through to live inference when the cache miss path
-            # populates `hero_payload = None`.
-            hero_payload = job.get("hero_payload")
-            if hero_payload is not None:
-                result = hero_payload
-            else:
-                # Serialize TRIBE access — see TribeService.lock docstring.
-                async with tribe_service.lock:
-                    if mode == "text":
-                        result = tribe_service.analyze_text(job["input"]["text"])
-                    elif mode == "audio":
-                        audio_path = job["input"].get("path") or "stub.wav"
-                        result = tribe_service.analyze_audio(Path(audio_path))
-                    else:
-                        path = Path(job["input"].get("path") or job["input"].get("hero_slug") or "stub.mp4")
-                        result = tribe_service.analyze_video(path)
+            try:
+                # Hero replay: if the job carries a cached hero payload, surface it
+                # directly. Falls through to live inference when the cache miss path
+                # populates `hero_payload = None`.
+                hero_payload = job.get("hero_payload")
+                if hero_payload is not None:
+                    result = hero_payload
+                else:
+                    # Serialize TRIBE access — see TribeService.lock docstring.
+                    async with tribe_service.lock:
+                        if mode == "text":
+                            result = tribe_service.analyze_text(job["input"]["text"])
+                        elif mode == "audio":
+                            audio_path = job["input"].get("path") or "stub.wav"
+                            result = tribe_service.analyze_audio(Path(audio_path))
+                        else:
+                            path = Path(job["input"].get("path") or job["input"].get("hero_slug") or "stub.mp4")
+                            cached = job.get("cached_result")
+                            if cached is not None:
+                                logger.info("video cache HIT for job %s (digest=%s)", job_id, job["input"].get("digest", "")[:12])
+                                result = cached
+                                # Re-derive cold_zones with the current detector — older cache
+                                # entries were written when the absolute z-threshold produced [].
+                                try:
+                                    import numpy as np
+                                    lang = (result.get("engagement_curves") or {}).get("language") or []
+                                    if lang:
+                                        result["cold_zones"] = tribe_service._cold_zones(np.asarray(lang, dtype=np.float32))
+                                except Exception as exc:
+                                    logger.warning("cold_zones recompute on cache hit failed: %s", exc)
+                            else:
+                                result = tribe_service.analyze_video(path)
+                                digest = job["input"].get("digest")
+                                if digest:
+                                    video_cache.put(digest, result)
+            except TooShortInputError as exc:
+                yield streaming.error(str(exc))
+                return
+            except Exception as exc:
+                logger.exception("TRIBE analyze failed for job %s", job_id)
+                yield streaming.error(f"analysis failed: {exc}")
+                return
 
             if mode in ("audio", "video"):
                 yield streaming.transcript(result.get("transcript", []))
@@ -224,7 +261,19 @@ async def stream(job_id: str) -> EventSourceResponse:
                 await asyncio.sleep(0.03)
 
             yield streaming.cold_zones(result["cold_zones"])
-            yield streaming.suggestions([])
+            if mode in ("audio", "video"):
+                try:
+                    feedback = gemma_service.video_feedback(
+                        transcript=result.get("transcript", []) or [],
+                        cold_zones=result.get("cold_zones", []) or [],
+                        engagement_curves=result.get("engagement_curves", {}) or {},
+                    )
+                except Exception as exc:
+                    logger.warning("gemma feedback failed for job %s: %s", job_id, exc)
+                    feedback = []
+                yield streaming.suggestions(feedback)
+            else:
+                yield streaming.suggestions([])
 
             # For video jobs, cache pooled TRIBE features + ROI means + transcript
             # embedding so /predict-engagement and /similarity can look them up by
