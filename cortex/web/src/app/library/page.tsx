@@ -8,6 +8,7 @@
 
 import { useCallback, useEffect, useState } from 'react';
 import { AppShell } from '../components/AppShell';
+import { InspirationFeed } from '../components/InspirationFeed';
 import { LibraryUploader } from '../components/LibraryUploader';
 import { brainClient } from '../lib/brainClient';
 import { DEMO_CREATOR_ID } from '../lib/creator';
@@ -186,6 +187,8 @@ export default function LibraryPage() {
             </table>
           </div>
         )}
+
+        {ready && <InspirationFeed creatorId={DEMO_CREATOR_ID} />}
 
         {pendingDelete && (
           <DeleteConfirm

@@ -43,6 +43,10 @@ class EngagementPredictor:
         self._model = model
         self._loaded = model is not None
         self.version = version
+        # Held-out R² from the most recent fit. None = untrained / unknown — the
+        # NemoClaw curator (PRD §11.7) treats None as cold-start. R-03's refit
+        # writes a value here; the stub installed by load_default_predictor leaves it None.
+        self.r2: float | None = None
 
     @property
     def loaded(self) -> bool:
@@ -53,7 +57,10 @@ class EngagementPredictor:
         import joblib  # type: ignore
         bundle = joblib.load(path)
         if isinstance(bundle, dict) and "model" in bundle:
-            return cls(model=bundle["model"], version=bundle.get("version", "unknown"))
+            inst = cls(model=bundle["model"], version=bundle.get("version", "unknown"))
+            r2 = bundle.get("r2")
+            inst.r2 = float(r2) if isinstance(r2, (int, float)) else None
+            return inst
         # Backward-compat: pickle is a bare estimator.
         return cls(model=bundle, version="unknown")
 
@@ -64,7 +71,8 @@ class EngagementPredictor:
         path.parent.mkdir(parents=True, exist_ok=True)
         joblib.dump({"model": self._model, "version": self.version,
                      "feature_columns": FEATURE_COLUMNS,
-                     "extra_columns": EXTRA_CONTEXT_COLUMNS}, path)
+                     "extra_columns": EXTRA_CONTEXT_COLUMNS,
+                     "r2": self.r2}, path)
 
     def fit(self, X: np.ndarray, y_log_rate: np.ndarray) -> None:
         if self._model is None:

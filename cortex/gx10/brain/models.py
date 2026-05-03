@@ -156,3 +156,47 @@ class LibraryFromJobRequest(BaseModel):
     creator_id: str = Field(..., min_length=1, max_length=64)
     # Optional override; defaults to a name derived from the original upload filename.
     video_id: str | None = Field(default=None, max_length=128)
+
+
+class InspirationRecommendation(BaseModel):
+    """One trending Shorts match in the inspiration feed (PRD §11.8)."""
+    video_id: str
+    score: float
+    thumbnail_url: str | None = None
+    source_url: str | None = None
+    uploaded_at: str
+    creator_handle: str | None = None
+    view_count: int = 0
+    engagement_rate: float = 0.0
+    dominant_roi: Literal["visual", "auditory", "language"]
+    roi_breakdown: RoiBreakdown
+
+
+class InspirationResponse(BaseModel):
+    """Response shape for `GET /inspiration/{creator_id}` (PRD §11.8).
+
+    Cold-start (library < MIN or trending pool empty) → recommendations=[]
+    + a `message` describing what the creator must do."""
+    recommendations: list[InspirationRecommendation] = Field(default_factory=list)
+    library_size: int
+    trending_pool_size: int
+    creator_id: str
+    centroid_age_s: int = 0  # always-fresh; cache layer would change this
+    message: str | None = None
+
+
+class CuratorStatusResponse(BaseModel):
+    """Status of the NemoClaw curator (PRD §11.7).
+
+    Forward-compatible shape — R-01 fills in `running` / iter counters / kill-switch
+    state; R-02/R-03/R-04 populate `last_r2`, `corpus_size`, `trending_pool_size`."""
+    running: bool
+    enabled: bool  # cache/curator.enabled present
+    kill_switch: bool  # cache/curator.disabled present (vetoes enabled)
+    paused_for_jobs: bool
+    iter_count: int
+    last_iter_at: str | None = None
+    last_iter_type: Literal["corpus", "trending"] | None = None
+    corpus_size: int = 0
+    trending_pool_size: int = 0
+    last_r2: float | None = None

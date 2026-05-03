@@ -8,6 +8,7 @@ import type {
   BrainFrame,
   ColdZone,
   EditSuggestion,
+  InspirationResponse,
   LibraryListResponse,
   LibraryUploadResponse,
   PredictEngagementResponse,
@@ -167,6 +168,12 @@ export const brainClient = {
     );
     if (!res.ok) throw new BrainClientError(`/library/${creatorId}/${videoId} → ${res.status}`);
     return (await res.json()) as { creator_id: string; video_id: string; library_size: number };
+  },
+
+  async getInspiration(creatorId: string, signal?: AbortSignal): Promise<InspirationResponse> {
+    const res = await fetch(url(`/inspiration/${encodeURIComponent(creatorId)}`), { signal });
+    if (!res.ok) throw new BrainClientError(`/inspiration/${creatorId} → ${res.status}`);
+    return (await res.json()) as InspirationResponse;
   },
 
   predictSimilarity(

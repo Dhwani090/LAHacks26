@@ -19,6 +19,7 @@ os.environ.setdefault("CORTEX_STUB_TRIBE", "1")
 os.environ.setdefault("CORTEX_STUB_GEMMA", "1")
 os.environ.setdefault("CORTEX_STUB_TRANSCRIBE", "1")
 os.environ.setdefault("CORTEX_STUB_EMBED", "1")
+os.environ.setdefault("CORTEX_STUB_CURATOR", "1")
 
 from fastapi.testclient import TestClient  # noqa: E402
 

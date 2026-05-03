@@ -1,15 +1,16 @@
 # Cortex — architecture 1-pager
 
-> **One sentence:** A neuroscience model on a GX10 in our backpack tells creators what an average viewer's brain does with their draft, predicts engagement, and detects originality drift — all before they post.
+> **One sentence:** A neuroscience model on a GX10 in our backpack tells creators what an average viewer's brain does with their draft, predicts engagement, detects originality drift, and surfaces trending Shorts that match their style — all before they post, all on-box.
 
-## The two questions a creator asks before they post
+## The three questions a creator asks before they post
 
 | Question | How we answer it |
 |---|---|
 | **Will this work?** | Pool TRIBE v2's per-second whole-brain BOLD prediction into a 21-dim ROI feature vector. Feed it to a Ridge regressor trained on a corpus of real Shorts paired with views/follower counts. Output: predicted engagement rate + percentile band ("top 25% for your size"). |
 | **Am I repeating myself?** | Persist past clips as `(TRIBE-pooled, transcript-embedding)` only — no raw video. Cosine-rank a new draft against the creator's library in <50ms. Surface top-3 with a per-region (visual / auditory / language) breakdown chip. |
+| **What should I make next?** | Idle-time NemoClaw agent on the GX10 keeps a date-partitioned pool of trending YouTube Shorts (TRIBE-pooled + transcript embedding only — no mp4). Compute the creator's centroid from their library → cosine-rank the trending pool → surface top-3 with similarity score + source URL. |
 
-Both questions fall out of the **same TRIBE pooling** — one inference pass per draft.
+All three questions fall out of the **same TRIBE pooling** — one inference pipeline, one agent. NemoClaw rotates two iteration types: 5-of-6 are **active-learning** iterations against the engagement corpus (gap-finder identifies the predictor's weakest bin → Gemma translates to `yt-dlp ytsearch20:` queries → scrape, pool, refit, R²-rollback if regressed) and 1-of-6 is a **trending** iteration that refreshes the inspiration pool. No `seed_urls.txt`, no manual URL list — query state is bootstrap niches → gap-driven Gemma queries → self-supervised query expansion from top-engagement transcripts. Choosing NemoClaw over OpenClaw is intentional: the GX10 is NVIDIA Blackwell silicon and the ASUS challenge is partnered with NVIDIA, so NeMo-stack alignment is a free judging signal. The box gets smarter on its own — even when no one is using it.
 
 ## Stack at a glance
 
@@ -21,10 +22,12 @@ Both questions fall out of the **same TRIBE pooling** — one inference pass per
 │  /predict  upload + brain + predict     │    │                                            │
 │  /library  past clips, length+timestamp │    │  TRIBE v2 (LLaMA-3.2-3B + V-JEPA2 +        │
 │                                         │    │             Wav2Vec-BERT)        ~30 GB    │
-│  Niivue (fsaverage5, 20484 verts)       │    │  Gemma 2B (text rewrites)        ~5 GB     │
+│  Niivue (fsaverage5, 20484 verts)       │    │  Gemma 2B (text rewrites + curator) ~5 GB  │
 │  EventSource for SSE brain frames       │    │  Whisper-base + nomic-embed      ~700 MB   │
 │  Zustand for state                      │◄──►│  Ridge regressor + corpus.jsonl  KB        │
-│                                         │    │  Per-creator library JSON        ~8 KB/clip │
+│                                         │    │  Per-creator library JSON        ~8 KB/clip│
+│                                         │    │  cache/trending/<date>/ (7d TTL) ~800 KB   │
+│                                         │    │  curator.py (asyncio, idle-time loop)      │
 └─────────────────────────────────────────┘    └────────────────────────────────────────────┘
                        ↕
               HTTP/JSON + SSE over Tailscale (WireGuard)
@@ -56,7 +59,8 @@ Steps 3-5 reuse cached job features. Inference happens once.
 | ChromaDB / SQLite / vector DB | <10k creator clips fit in 80MB RAM. Brute-force numpy cosine ranks in <50ms. No vector DB needed. |
 | Cloud inference fallback | Local or nothing. The whole pitch is "your draft never leaves the box." |
 | iOS/Android app, auth, multi-tenant | 36 hours. Single demo creator (`DEMO_CREATOR_ID`); auth is a one-file change later. |
-| Live IG/TikTok scraping during demo | Both rate-limit aggressively. Seed corpus is 50 hand-pulled YT Shorts via yt-dlp; scraper-agent is roadmap. |
+| Live IG/TikTok scraping during demo | Both rate-limit aggressively and lack public trending APIs. v1 inspiration feed is **YouTube Shorts only** via yt-dlp. |
+| Auto-publishing or remixing scraped trending content | The inspiration feed *links out* to the original Shorts URL. We never re-host video. Raw mp4s are deleted post-feature-extraction; only TRIBE features + transcript embeddings persist. |
 
 ## Honest framing
 

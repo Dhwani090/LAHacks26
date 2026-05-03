@@ -18,11 +18,19 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from sse_starlette.sse import EventSourceResponse
 
-from . import config, models, streaming
+from . import config, curator as curator_mod, models, streaming
 from .cache import hero_cache
 from .corpus import corpus
 from .gemma import gemma_service
-from .library import LibraryEntry, filter_candidates, library_registry, now_iso, rank_similar
+from .library import (
+    LibraryEntry,
+    compute_centroid,
+    filter_candidates,
+    library_registry,
+    load_trending_pool,
+    now_iso,
+    rank_similar,
+)
 from .pooling import frames_to_array, pool_tribe_output, roi_mean_vector
 from .predictor import load_default_predictor, predictor
 from .text_embed import embed_text
@@ -41,7 +49,23 @@ async def lifespan(app: FastAPI):
     gemma_service.load()
     corpus.load(config.CACHE_DIR / "corpus.jsonl")
     load_default_predictor()
-    yield
+    # NemoClaw curator (PRD §11.7) — off unless cache/curator.enabled exists.
+    # Spawn unconditionally so a creator can flip the gate file at runtime; the
+    # loop stays idle while the file is absent.
+    curator_task: asyncio.Task[None] | None = None
+    if not curator_mod.is_stub():
+        curator_task = asyncio.create_task(
+            curator_mod.curator_loop(active_streams_fn=lambda: _active_streams)
+        )
+    try:
+        yield
+    finally:
+        if curator_task is not None:
+            curator_task.cancel()
+            try:
+                await curator_task
+            except asyncio.CancelledError:
+                pass
 
 
 app = FastAPI(title="Cortex Brain", version="0.3.0", lifespan=lifespan)
@@ -59,6 +83,9 @@ app.mount("/cache", StaticFiles(directory=str(config.CACHE_DIR)), name="cache")
 
 _STARTED_AT = time.time()
 _JOBS: dict[str, dict[str, Any]] = {}
+# Curator priority gate (PRD §11.7) — incremented at top of /stream/{job_id}
+# and decremented in try/finally so the loop yields the box to live inference.
+_active_streams: int = 0
 
 
 @app.get("/health", response_model=models.HealthResponse)
@@ -175,100 +202,109 @@ async def stream(job_id: str) -> EventSourceResponse:
         raise HTTPException(status_code=404, detail="unknown job_id")
 
     async def gen():
-        mode = job["mode"]
-        budgets = {"text": config.TEXT_BUDGET_S, "audio": config.AUDIO_BUDGET_S, "video": config.VIDEO_BUDGET_S}
-        yield streaming.started(mode=mode, estimated_ms=int(budgets[mode] * 1000))
-
+        global _active_streams
+        # Curator priority gate — keep this counter accurate even on early exit.
+        _active_streams += 1
         try:
-            # Hero replay: if the job carries a cached hero payload, surface it
-            # directly. Falls through to live inference when the cache miss path
-            # populates `hero_payload = None`.
-            hero_payload = job.get("hero_payload")
-            if hero_payload is not None:
-                result = hero_payload
-            elif mode == "text":
-                result = tribe_service.analyze_text(job["input"]["text"])
-            elif mode == "audio":
-                audio_path = job["input"].get("path") or "stub.wav"
-                result = tribe_service.analyze_audio(Path(audio_path))
-            else:
-                path = Path(job["input"].get("path") or job["input"].get("hero_slug") or "stub.mp4")
-                cached = job.get("cached_result")
-                if cached is not None:
-                    logger.info("video cache HIT for job %s (digest=%s)", job_id, job["input"].get("digest", "")[:12])
-                    result = cached
-                    # Re-derive cold_zones with the current detector — older cache
-                    # entries were written when the absolute z-threshold produced [].
-                    try:
-                        import numpy as np
-                        lang = (result.get("engagement_curves") or {}).get("language") or []
-                        if lang:
-                            result["cold_zones"] = tribe_service._cold_zones(np.asarray(lang, dtype=np.float32))
-                    except Exception as exc:
-                        logger.warning("cold_zones recompute on cache hit failed: %s", exc)
+            mode = job["mode"]
+            budgets = {"text": config.TEXT_BUDGET_S, "audio": config.AUDIO_BUDGET_S, "video": config.VIDEO_BUDGET_S}
+            yield streaming.started(mode=mode, estimated_ms=int(budgets[mode] * 1000))
+
+            try:
+                # Hero replay: if the job carries a cached hero payload, surface it
+                # directly. Falls through to live inference when the cache miss path
+                # populates `hero_payload = None`.
+                hero_payload = job.get("hero_payload")
+                if hero_payload is not None:
+                    result = hero_payload
                 else:
-                    result = tribe_service.analyze_video(path)
-                    digest = job["input"].get("digest")
-                    if digest:
-                        video_cache.put(digest, result)
-        except TooShortInputError as exc:
-            yield streaming.error(str(exc))
-            return
-        except Exception as exc:
-            logger.exception("TRIBE analyze failed for job %s", job_id)
-            yield streaming.error(f"analysis failed: {exc}")
-            return
-
-        if mode in ("audio", "video"):
-            yield streaming.transcript(result.get("transcript", []))
-
-        for frame in result["brain_frames"]:
-            yield streaming.brain_frame(t=frame["t"], activation=frame["activation"])
-            await asyncio.sleep(0.03)
-
-        yield streaming.cold_zones(result["cold_zones"])
-        if mode in ("audio", "video"):
-            try:
-                feedback = gemma_service.video_feedback(
-                    transcript=result.get("transcript", []) or [],
-                    cold_zones=result.get("cold_zones", []) or [],
-                    engagement_curves=result.get("engagement_curves", {}) or {},
-                )
+                    # Serialize TRIBE access — see TribeService.lock docstring.
+                    async with tribe_service.lock:
+                        if mode == "text":
+                            result = tribe_service.analyze_text(job["input"]["text"])
+                        elif mode == "audio":
+                            audio_path = job["input"].get("path") or "stub.wav"
+                            result = tribe_service.analyze_audio(Path(audio_path))
+                        else:
+                            path = Path(job["input"].get("path") or job["input"].get("hero_slug") or "stub.mp4")
+                            cached = job.get("cached_result")
+                            if cached is not None:
+                                logger.info("video cache HIT for job %s (digest=%s)", job_id, job["input"].get("digest", "")[:12])
+                                result = cached
+                                # Re-derive cold_zones with the current detector — older cache
+                                # entries were written when the absolute z-threshold produced [].
+                                try:
+                                    import numpy as np
+                                    lang = (result.get("engagement_curves") or {}).get("language") or []
+                                    if lang:
+                                        result["cold_zones"] = tribe_service._cold_zones(np.asarray(lang, dtype=np.float32))
+                                except Exception as exc:
+                                    logger.warning("cold_zones recompute on cache hit failed: %s", exc)
+                            else:
+                                result = tribe_service.analyze_video(path)
+                                digest = job["input"].get("digest")
+                                if digest:
+                                    video_cache.put(digest, result)
+            except TooShortInputError as exc:
+                yield streaming.error(str(exc))
+                return
             except Exception as exc:
-                logger.warning("gemma feedback failed for job %s: %s", job_id, exc)
-                feedback = []
-            yield streaming.suggestions(feedback)
-        else:
-            yield streaming.suggestions([])
+                logger.exception("TRIBE analyze failed for job %s", job_id)
+                yield streaming.error(f"analysis failed: {exc}")
+                return
 
-        # For video jobs, cache pooled TRIBE features + ROI means + transcript
-        # embedding so /predict-engagement and /similarity can look them up by
-        # job_id without re-running inference.
-        if mode == "video":
-            try:
-                arr = frames_to_array(result["brain_frames"])
-                job["pooled_features"] = pool_tribe_output(arr).tolist()
-                job["roi_means"] = roi_mean_vector(arr).tolist()
-                job["duration_s"] = float(result.get("duration_s") or arr.shape[0])
-                job["n_cold_zones"] = int(len(result.get("cold_zones") or []))
-                transcript_words = result.get("transcript") or []
-                transcript_text = " ".join(
-                    w.get("text", "") if isinstance(w, dict) else str(w)
-                    for w in transcript_words
-                ).strip()
-                job["transcript_text"] = transcript_text
-                if transcript_text:
-                    job["text_embedding"] = embed_text(transcript_text).tolist()
-            except Exception as exc:
-                logger.error("pooling failed for job %s: %s", job_id, exc)
+            if mode in ("audio", "video"):
+                yield streaming.transcript(result.get("transcript", []))
 
-        yield streaming.complete(
-            {
-                "mode": mode,
-                "duration_s": result.get("duration_s", 0),
-                "engagement_curves": result.get("engagement_curves", {}),
-            }
-        )
+            for frame in result["brain_frames"]:
+                yield streaming.brain_frame(t=frame["t"], activation=frame["activation"])
+                await asyncio.sleep(0.03)
+
+            yield streaming.cold_zones(result["cold_zones"])
+            if mode in ("audio", "video"):
+                try:
+                    feedback = gemma_service.video_feedback(
+                        transcript=result.get("transcript", []) or [],
+                        cold_zones=result.get("cold_zones", []) or [],
+                        engagement_curves=result.get("engagement_curves", {}) or {},
+                    )
+                except Exception as exc:
+                    logger.warning("gemma feedback failed for job %s: %s", job_id, exc)
+                    feedback = []
+                yield streaming.suggestions(feedback)
+            else:
+                yield streaming.suggestions([])
+
+            # For video jobs, cache pooled TRIBE features + ROI means + transcript
+            # embedding so /predict-engagement and /similarity can look them up by
+            # job_id without re-running inference.
+            if mode == "video":
+                try:
+                    arr = frames_to_array(result["brain_frames"])
+                    job["pooled_features"] = pool_tribe_output(arr).tolist()
+                    job["roi_means"] = roi_mean_vector(arr).tolist()
+                    job["duration_s"] = float(result.get("duration_s") or arr.shape[0])
+                    job["n_cold_zones"] = int(len(result.get("cold_zones") or []))
+                    transcript_words = result.get("transcript") or []
+                    transcript_text = " ".join(
+                        w.get("text", "") if isinstance(w, dict) else str(w)
+                        for w in transcript_words
+                    ).strip()
+                    job["transcript_text"] = transcript_text
+                    if transcript_text:
+                        job["text_embedding"] = embed_text(transcript_text).tolist()
+                except Exception as exc:
+                    logger.error("pooling failed for job %s: %s", job_id, exc)
+
+            yield streaming.complete(
+                {
+                    "mode": mode,
+                    "duration_s": result.get("duration_s", 0),
+                    "engagement_curves": result.get("engagement_curves", {}),
+                }
+            )
+        finally:
+            _active_streams = max(0, _active_streams - 1)
 
     return EventSourceResponse(gen())
 
@@ -354,7 +390,8 @@ async def library_upload(
         f.write(await file.read())
 
     try:
-        result = tribe_service.analyze_video(tmp_path)
+        async with tribe_service.lock:
+            result = tribe_service.analyze_video(tmp_path)
         arr = frames_to_array(result["brain_frames"])
         pooled = pool_tribe_output(arr)
         roi_means = roi_mean_vector(arr)
@@ -550,4 +587,90 @@ async def similarity(req: models.SimilarityRequest) -> models.SimilarityResponse
         creator_id=req.creator_id,
         weighting={"brain": config.SIMILARITY_BRAIN_WEIGHT, "text": config.SIMILARITY_TEXT_WEIGHT},
         filter={"last_n": req.last_n, "since_days": req.since_days},
+    )
+
+
+@app.get("/inspiration/{creator_id}", response_model=models.InspirationResponse)
+async def inspiration(creator_id: str) -> models.InspirationResponse:
+    """Surface trending YouTube Shorts that match the creator's brain centroid (PRD §11.8).
+
+    Cold-start: library < SIMILARITY_MIN_LIBRARY_SIZE → empty + message.
+    Trending pool empty → empty + message (curator hasn't harvested yet)."""
+    import numpy as np
+
+    # Reuse library.py path-traversal regex via the registry's loader.
+    try:
+        library = library_registry.load_creator_library(creator_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+    trending_entries, trending_extras = load_trending_pool(config.CURATOR_TRENDING_DIR)
+
+    if len(library) < config.SIMILARITY_MIN_LIBRARY_SIZE:
+        return models.InspirationResponse(
+            recommendations=[],
+            library_size=len(library),
+            trending_pool_size=len(trending_entries),
+            creator_id=creator_id,
+            message=f"upload at least {config.SIMILARITY_MIN_LIBRARY_SIZE} past clips to enable inspiration feed",
+        )
+
+    if not trending_entries:
+        return models.InspirationResponse(
+            recommendations=[],
+            library_size=len(library),
+            trending_pool_size=0,
+            creator_id=creator_id,
+            message="trending pool not yet populated by curator — check back later",
+        )
+
+    centroid_brain, centroid_text, centroid_roi = compute_centroid(library)
+
+    matches = rank_similar(
+        draft_brain=centroid_brain,
+        draft_text=centroid_text,
+        draft_roi_means=centroid_roi,
+        library=trending_entries,
+        # Trending pool needs only ≥ 1 entry — the creator-library gate is upstream.
+        min_library=1,
+    )
+
+    return models.InspirationResponse(
+        recommendations=[
+            models.InspirationRecommendation(
+                video_id=m["video_id"],
+                score=m["score"],
+                thumbnail_url=m["thumbnail_url"],
+                source_url=trending_extras.get(m["video_id"], {}).get("source_url"),
+                uploaded_at=m["uploaded_at"],
+                creator_handle=trending_extras.get(m["video_id"], {}).get("creator_handle"),
+                view_count=trending_extras.get(m["video_id"], {}).get("view_count", 0),
+                engagement_rate=trending_extras.get(m["video_id"], {}).get("engagement_rate", 0.0),
+                dominant_roi=m["dominant_roi"],
+                roi_breakdown=models.RoiBreakdown(**m["roi_breakdown"]),
+            )
+            for m in matches
+        ],
+        library_size=len(library),
+        trending_pool_size=len(trending_entries),
+        creator_id=creator_id,
+    )
+
+
+@app.get("/curator/status", response_model=models.CuratorStatusResponse)
+async def curator_status() -> models.CuratorStatusResponse:
+    """NemoClaw curator state (PRD §11.7). R-01 fills running/iter fields;
+    R-02/R-03/R-04 fill corpus_size, trending_pool_size, last_r2."""
+    state = curator_mod.CURATOR_STATE
+    return models.CuratorStatusResponse(
+        running=state.running,
+        enabled=config.CURATOR_ENABLED_FILE.exists(),
+        kill_switch=config.CURATOR_DISABLED_FILE.exists(),
+        paused_for_jobs=state.paused_for_jobs,
+        iter_count=state.iter_count,
+        last_iter_at=state.last_iter_at,
+        last_iter_type=state.last_iter_type,  # type: ignore[arg-type]
+        corpus_size=corpus.size(),
+        trending_pool_size=curator_mod.count_trending_entries(),
+        last_r2=predictor.r2,
     )

@@ -11,6 +11,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 os.environ.setdefault("CORTEX_STUB_TRIBE", "1")
 os.environ.setdefault("CORTEX_STUB_GEMMA", "1")
+os.environ.setdefault("CORTEX_STUB_CURATOR", "1")
 
 from fastapi.testclient import TestClient  # noqa: E402
 
